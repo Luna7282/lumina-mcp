@@ -4,31 +4,6 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, field_validator
 
 
-class FileNodeSchema(BaseModel):
-    path: str
-    language: str
-    exports: list[str] = []
-    imports: list[str] = []
-    classes: list[str] = []
-    functions: list[str] = []
-    routes: list[str] = []
-    models: list[str] = []
-    complexity_score: float = 0.0
-
-
-class EdgeSchema(BaseModel):
-    source: str
-    target: str
-    kind: str
-
-
-class CodebaseGraphSchema(BaseModel):
-    files: dict[str, FileNodeSchema] = {}
-    edges: list[EdgeSchema] = []
-    layers: dict[str, list[str]] = {}
-    language_summary: dict[str, int] = {}
-
-
 class CodebaseFileRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -92,24 +67,15 @@ class AnalyzeRequest(BaseModel):
         return v
 
 
-class FileNodeResponse(BaseModel):
-    path: str
-    language: str
-    exports: list[str]
-    imports: list[str]
-    classes: list[str]
-    functions: list[str]
-    routes: list[str]
-    models: list[str]
-    complexity_score: float
-
-
 class AnalyzeResponse(BaseModel):
     codebase_id: str
     name: str
     file_count: int
+    node_count: int
+    edge_count: int
+    god_nodes: list[dict]
+    community_count: int
     language_summary: dict[str, int]
-    layers: dict[str, list[str]]
     cached: bool  # True if this content_hash was already analyzed
 
 

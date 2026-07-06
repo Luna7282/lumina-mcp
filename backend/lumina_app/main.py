@@ -1,5 +1,3 @@
-import hashlib
-import json
 import uuid
 from contextlib import asynccontextmanager
 
@@ -8,8 +6,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumina_app.database import create_all_tables, get_db
+from lumina_app.extract.cache import codebase_hash, compute_hashes
+from lumina_app.extract.cluster import detect_communities, get_community_summary
+from lumina_app.extract.dispatch import extract_all
+from lumina_app.extract.graph import build_graph, get_god_nodes, get_language_summary
 from lumina_app.models import Codebase, CodebaseFile
-from lumina_app.parser.graph import build_graph
 from lumina_app.schemas import AnalyzeRequest, AnalyzeResponse, CodebaseRead
 from lumina_app.settings import settings
 
@@ -36,53 +37,56 @@ async def analyze_codebase(
     request: AnalyzeRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Accept files, build graph, store in DB, return codebase_id."""
-    # 1. Compute content hash for deduplication (sorted for determinism)
-    content = json.dumps(dict(sorted(request.files.items())), sort_keys=True)
-    content_hash = hashlib.sha256(content.encode()).hexdigest()
+    """Accept files, extract a multi-language code graph, store in DB, return codebase_id."""
+    # 1. Compute content hash for deduplication
+    content_hash = codebase_hash(request.files)
 
     # 2. Check if already analyzed (return cached result)
     result = await db.execute(select(Codebase).where(Codebase.content_hash == content_hash))
     existing = result.scalar_one_or_none()
     if existing is not None:
+        stored_graph = existing.graph
         return AnalyzeResponse(
             codebase_id=str(existing.id),
             name=existing.name,
             file_count=existing.file_count,
+            node_count=len(stored_graph.get("nodes", [])),
+            edge_count=len(stored_graph.get("edges", [])),
+            god_nodes=stored_graph.get("god_nodes", []),
+            community_count=len(set(stored_graph.get("communities", {}).values())),
             language_summary=existing.language_summary,
-            layers=existing.graph.get("layers", {}),
             cached=True,
         )
 
-    # 3. Build graph (no AI — pure static analysis)
-    graph = build_graph(request.files)
+    # 3. Extract, build graph, cluster (no AI — pure static + graph analysis)
+    extractions = extract_all(request.files)
+    G = build_graph(extractions)
+    communities = detect_communities(G)
+    community_summary = get_community_summary(G, communities)
+    god_nodes = get_god_nodes(G)
+    language_summary = get_language_summary(extractions)
+    file_hashes = compute_hashes(request.files)
+
+    nodes_payload = [{"id": node_id, **data} for node_id, data in G.nodes(data=True)]
+    edges_payload = [
+        {"source": u, "target": v, **data} for u, v, data in G.edges(data=True)
+    ]
 
     # 4. Store in DB
     codebase = Codebase(
         name=request.name,
         source="api",
         content_hash=content_hash,
-        file_count=len(graph.files),
-        language_summary=graph.language_summary,
+        file_count=len(extractions),
+        language_summary=language_summary,
         graph={
-            "layers": graph.layers,
-            "edges": [
-                {"source": e.source, "target": e.target, "kind": e.kind}
-                for e in graph.edges
-            ],
-            "files": {
-                path: {
-                    "language": node.language,
-                    "exports": node.exports,
-                    "imports": node.imports,
-                    "classes": node.classes,
-                    "functions": node.functions,
-                    "routes": node.routes,
-                    "models": node.models,
-                    "complexity_score": node.complexity_score,
-                }
-                for path, node in graph.files.items()
-            },
+            "nodes": nodes_payload,
+            "edges": edges_payload,
+            "communities": communities,
+            "community_summary": community_summary,
+            "god_nodes": god_nodes,
+            "language_summary": language_summary,
+            "file_hashes": file_hashes,
         },
     )
     db.add(codebase)
@@ -90,20 +94,24 @@ async def analyze_codebase(
     # reference it as a foreign key on the per-file rows below.
     await db.flush()
 
-    # 5. Store individual file records
-    for path, node in graph.files.items():
+    # 5. Store individual file records, grouped from the extracted nodes
+    for path, extraction in extractions.items():
+        classes = [n.label for n in extraction.nodes if n.type in ("class", "model")]
+        functions = [n.label for n in extraction.nodes if n.type in ("function", "method")]
+        routes = [n.label for n in extraction.nodes if n.type == "route"]
+        imports = [n.label for n in extraction.nodes if n.type == "import"]
         db.add(
             CodebaseFile(
                 codebase_id=codebase.id,
                 path=path,
-                language=node.language,
-                exports=node.exports,
-                imports=node.imports,
-                classes=node.classes,
-                functions=node.functions,
-                routes=node.routes,
-                models=node.models,
-                complexity_score=node.complexity_score,
+                language=extraction.language,
+                exports=[],
+                imports=imports,
+                classes=classes,
+                functions=functions,
+                routes=routes,
+                models=[n.label for n in extraction.nodes if n.type == "model"],
+                complexity_score=float(len(functions)),
             )
         )
 
@@ -113,8 +121,11 @@ async def analyze_codebase(
         codebase_id=str(codebase.id),
         name=codebase.name,
         file_count=codebase.file_count,
-        language_summary=codebase.language_summary,
-        layers=graph.layers,
+        node_count=len(nodes_payload),
+        edge_count=len(edges_payload),
+        god_nodes=god_nodes,
+        community_count=len(set(communities.values())),
+        language_summary=language_summary,
         cached=False,
     )
 

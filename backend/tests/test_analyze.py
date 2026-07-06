@@ -42,7 +42,11 @@ class TestAnalyzeEndpoint:
         assert "codebase_id" in data
         assert data["name"] == "test-project"
         assert data["file_count"] == 3
-        assert data["language_summary"] == {"py": 3}
+        assert data["language_summary"] == {"python": 3}
+        assert data["node_count"] > 0
+        assert data["edge_count"] > 0
+        assert data["community_count"] >= 1
+        assert isinstance(data["god_nodes"], list)
         assert data["cached"] is False
 
     def test_analyze_same_files_again_is_cached(self, client):
@@ -95,9 +99,15 @@ class TestGetCodebaseEndpoint:
         assert data["id"] == codebase_id
         assert data["name"] == "test-project"
         assert data["file_count"] == 3
-        assert "layers" in data["graph"]
-        assert "files" in data["graph"]
-        assert set(data["graph"]["files"].keys()) == set(SAMPLE_FILES.keys())
+        assert "nodes" in data["graph"]
+        assert "edges" in data["graph"]
+        assert "communities" in data["graph"]
+        assert "community_summary" in data["graph"]
+        assert "god_nodes" in data["graph"]
+        assert "file_hashes" in data["graph"]
+        assert set(data["graph"]["file_hashes"].keys()) == set(SAMPLE_FILES.keys())
+        source_files = {n["source_file"] for n in data["graph"]["nodes"]}
+        assert source_files == set(SAMPLE_FILES.keys())
 
     def test_get_codebase_not_found(self, client):
         random_id = "00000000-0000-0000-0000-000000000000"
