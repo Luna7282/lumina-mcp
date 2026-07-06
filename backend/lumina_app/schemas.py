@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class FileNodeSchema(BaseModel):
@@ -74,9 +74,43 @@ class CodebaseVideoRead(BaseModel):
 
 
 class AnalyzeRequest(BaseModel):
+    files: dict[str, str]  # {filepath: content}
+    name: str = "unnamed"  # project name
+    focus: str | None = None  # optional hint
+
+    @field_validator("files")
+    @classmethod
+    def validate_files(cls, v: dict[str, str]) -> dict[str, str]:
+        if not v:
+            raise ValueError("files cannot be empty")
+        if len(v) > 500:
+            raise ValueError("maximum 500 files per analysis")
+        # Cap individual file size at 100KB
+        for path, content in v.items():
+            if len(content) > 100_000:
+                raise ValueError(f"file {path} exceeds 100KB limit")
+        return v
+
+
+class FileNodeResponse(BaseModel):
+    path: str
+    language: str
+    exports: list[str]
+    imports: list[str]
+    classes: list[str]
+    functions: list[str]
+    routes: list[str]
+    models: list[str]
+    complexity_score: float
+
+
+class AnalyzeResponse(BaseModel):
+    codebase_id: str
     name: str
-    source: str = "upload"
-    files: dict[str, str]  # path -> content
+    file_count: int
+    language_summary: dict[str, int]
+    layers: dict[str, list[str]]
+    cached: bool  # True if this content_hash was already analyzed
 
 
 class ExplainRequest(BaseModel):

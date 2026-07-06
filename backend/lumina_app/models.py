@@ -1,8 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text, Uuid
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -13,7 +12,7 @@ class Base(DeclarativeBase):
 class Codebase(Base):
     __tablename__ = "codebases"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(255))
     source: Mapped[str] = mapped_column(String(50))  # claude_code|github|upload
     content_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
@@ -38,9 +37,9 @@ class Codebase(Base):
 class CodebaseFile(Base):
     __tablename__ = "codebase_files"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     codebase_id: Mapped[uuid.UUID] = mapped_column(
-        UUID, ForeignKey("codebases.id"), index=True
+        Uuid, ForeignKey("codebases.id"), index=True
     )
     path: Mapped[str] = mapped_column(String(1000))
     language: Mapped[str] = mapped_column(String(50))
@@ -60,9 +59,9 @@ class CodebaseFile(Base):
 class CodebaseVideo(Base):
     __tablename__ = "codebase_videos"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     codebase_id: Mapped[uuid.UUID] = mapped_column(
-        UUID, ForeignKey("codebases.id"), index=True
+        Uuid, ForeignKey("codebases.id"), index=True
     )
     focus: Mapped[str] = mapped_column(String(500))  # "overview"|"auth flow" etc
     video_url: Mapped[str | None] = mapped_column(String(2000))
