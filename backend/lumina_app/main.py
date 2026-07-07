@@ -69,7 +69,17 @@ async def analyze_codebase(
 
     nodes_payload = [{"id": node_id, **data} for node_id, data in G.nodes(data=True)]
     edges_payload = [
-        {"source": u, "target": v, **data} for u, v, data in G.edges(data=True)
+        # G is undirected — NetworkX may report a pair as (u, v) or (v, u)
+        # depending on iteration order, so read the true direction from the
+        # edge's own "source"/"target" attributes (set in build_graph)
+        # rather than trusting the yielded tuple order.
+        {
+            "source": data["source"],
+            "target": data["target"],
+            "relation": data["relation"],
+            "confidence": data["confidence"],
+        }
+        for _, _, data in G.edges(data=True)
     ]
 
     # 4. Store in DB

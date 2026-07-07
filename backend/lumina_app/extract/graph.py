@@ -31,7 +31,16 @@ def build_graph(extractions: dict[str, ExtractionResult]) -> nx.Graph:
         label = data["label"]
         label_index.setdefault(label, []).append(node_id)
 
-    # Add all edges, resolving INFERRED cross-file calls
+    # Add all edges, resolving INFERRED cross-file calls.
+    #
+    # G is an *undirected* nx.Graph (required by the Leiden clustering step),
+    # but our relations (inherits, calls, handles, imports, ...) are
+    # inherently directional. NetworkX stores one shared data dict per pair
+    # and G.edges(data=True) can hand it back as (u, v) OR (v, u) depending
+    # on internal iteration order — so relying on the yielded tuple order
+    # silently flips direction for some edges. Stash the true direction in
+    # the data dict itself (under "source"/"target") so it survives
+    # regardless of which order NetworkX later reports the pair in.
     for filepath, result in extractions.items():
         for edge in result.edges:
             # Resolve target if it's a label reference
@@ -39,13 +48,27 @@ def build_graph(extractions: dict[str, ExtractionResult]) -> nx.Graph:
             target = edge.target
 
             if source in G and target in G:
-                G.add_edge(source, target, relation=edge.relation, confidence=edge.confidence)
+                G.add_edge(
+                    source, target,
+                    source=source, target=target,
+                    relation=edge.relation, confidence=edge.confidence,
+                )
             elif target not in G:
                 # Try to resolve by label
                 candidates = label_index.get(target, [])
                 if len(candidates) == 1:
-                    G.add_edge(source, candidates[0], relation=edge.relation, confidence="INFERRED")
+                    resolved_target = candidates[0]
+                    G.add_edge(
+                        source, resolved_target,
+                        source=source, target=resolved_target,
+                        relation=edge.relation, confidence="INFERRED",
+                    )
                 # else: dangling edge, skip (log warning)
+
+    # Self-loops are never meaningful here — e.g. an import node's own label
+    # matching its bare imported name resolves back to itself via the label
+    # index above. Strip them rather than filtering per-extractor.
+    G.remove_edges_from(nx.selfloop_edges(G))
 
     return G
 

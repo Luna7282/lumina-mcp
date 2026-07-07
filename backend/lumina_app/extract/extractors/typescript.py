@@ -32,7 +32,13 @@ class JSFamilyExtractor(TreeSitterExtractor):
         )
 
         symbols: dict[str, str] = {}
-        self._walk_children(tree.root_node.children, filepath, module_id, source, result, symbols, None)
+        # class_name -> {method_name: method_node_id}, pre-populated per class
+        # so `this.method()` calls resolve even when the call appears before
+        # the method's own definition in source order.
+        class_methods: dict[str, dict[str, str]] = {}
+        self._walk_children(
+            tree.root_node.children, filepath, module_id, source, result, symbols, None, class_methods
+        )
         return result
 
     def parse_for(self, filepath: str, content: str):
@@ -54,10 +60,11 @@ class JSFamilyExtractor(TreeSitterExtractor):
         result: ExtractionResult,
         symbols: dict[str, str],
         class_name: str | None,
+        class_methods: dict[str, dict[str, str]],
     ) -> None:
         for raw in nodes:
             for node in self._unwrap_export(raw):
-                self._handle_node(node, filepath, parent_id, source, result, symbols, class_name)
+                self._handle_node(node, filepath, parent_id, source, result, symbols, class_name, class_methods)
 
     def _handle_node(
         self,
@@ -68,12 +75,13 @@ class JSFamilyExtractor(TreeSitterExtractor):
         result: ExtractionResult,
         symbols: dict[str, str],
         class_name: str | None,
+        class_methods: dict[str, dict[str, str]],
     ) -> None:
         kind = node.type
         if kind == "class_declaration":
-            self._handle_class(node, filepath, parent_id, source, result, symbols)
+            self._handle_class(node, filepath, parent_id, source, result, symbols, class_methods)
         elif kind in ("function_declaration", "method_definition"):
-            self._handle_function(node, filepath, parent_id, source, result, symbols, class_name)
+            self._handle_function(node, filepath, parent_id, source, result, symbols, class_name, class_methods)
         elif kind == "lexical_declaration" or kind == "variable_declaration":
             for declarator in node.named_children:
                 if declarator.type != "variable_declarator":
@@ -82,7 +90,7 @@ class JSFamilyExtractor(TreeSitterExtractor):
                 name_node = declarator.child_by_field_name("name")
                 if value is not None and value.type == "arrow_function" and name_node is not None:
                     self._handle_function(
-                        value, filepath, parent_id, source, result, symbols, class_name,
+                        value, filepath, parent_id, source, result, symbols, class_name, class_methods,
                         override_name=self.node_text(name_node, source),
                     )
                     self._handle_route_call(value, filepath, parent_id, source, result)
@@ -110,6 +118,7 @@ class JSFamilyExtractor(TreeSitterExtractor):
         source: bytes,
         result: ExtractionResult,
         symbols: dict[str, str],
+        class_methods: dict[str, dict[str, str]],
     ) -> None:
         name_node = node.child_by_field_name("name")
         if name_node is None:
@@ -149,7 +158,20 @@ class JSFamilyExtractor(TreeSitterExtractor):
 
         body = node.child_by_field_name("body")
         if body is not None:
-            self._walk_children(body.children, filepath, class_id, source, result, symbols, class_name)
+            # Pre-register this class's own methods so a `this.x()` call
+            # resolves EXTRACTED even when it appears before `x` is defined.
+            methods_for_class: dict[str, str] = {}
+            for child in body.children:
+                if child.type == "method_definition":
+                    method_name_node = child.child_by_field_name("name")
+                    if method_name_node is not None:
+                        method_name = self.node_text(method_name_node, source)
+                        methods_for_class[method_name] = self.make_node_id(filepath, class_name, method_name)
+            class_methods[class_name] = methods_for_class
+
+            self._walk_children(
+                body.children, filepath, class_id, source, result, symbols, class_name, class_methods
+            )
 
     def _handle_model(
         self,
@@ -197,6 +219,7 @@ class JSFamilyExtractor(TreeSitterExtractor):
         result: ExtractionResult,
         symbols: dict[str, str],
         class_name: str | None,
+        class_methods: dict[str, dict[str, str]],
         override_name: str | None = None,
     ) -> None:
         name_node = node.child_by_field_name("name")
@@ -228,10 +251,17 @@ class JSFamilyExtractor(TreeSitterExtractor):
 
         if body is not None:
             for call in self.find_descendants_by_type(body, "call_expression"):
-                self._handle_call(call, func_id, source, result, symbols)
+                self._handle_call(call, func_id, source, result, symbols, class_name, class_methods)
 
     def _handle_call(
-        self, call: Node, caller_id: str, source: bytes, result: ExtractionResult, symbols: dict[str, str]
+        self,
+        call: Node,
+        caller_id: str,
+        source: bytes,
+        result: ExtractionResult,
+        symbols: dict[str, str],
+        class_name: str | None,
+        class_methods: dict[str, dict[str, str]],
     ) -> None:
         func = call.child_by_field_name("function")
         if func is None:
@@ -239,6 +269,20 @@ class JSFamilyExtractor(TreeSitterExtractor):
         if func.type == "identifier":
             called_name = self.node_text(func, source)
         elif func.type == "member_expression":
+            obj = func.child_by_field_name("object")
+            prop = func.child_by_field_name("property")
+            if obj is not None and obj.type == "this" and prop is not None:
+                method_name = self.node_text(prop, source)
+                target_id = class_methods.get(class_name, {}).get(method_name) if class_name else None
+                if target_id:
+                    result.edges.append(
+                        Edge(source=caller_id, target=target_id, relation="calls", confidence="EXTRACTED")
+                    )
+                else:
+                    result.edges.append(
+                        Edge(source=caller_id, target=method_name, relation="calls", confidence="INFERRED")
+                    )
+                return
             called_name = self.node_text(func, source)
         else:
             return

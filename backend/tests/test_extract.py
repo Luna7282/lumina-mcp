@@ -83,6 +83,38 @@ class Dog(Animal):
         assert inherits[0].target == "animals.py::Animal"
         assert inherits[0].confidence == "EXTRACTED"
 
+    def test_inherits_edge_to_sqlalchemy_base_class(self):
+        code = """
+class Base(DeclarativeBase):
+    pass
+
+
+class User(Base):
+    pass
+"""
+        result = self.extractor.extract("models.py", code)
+        inherits = {(e.source, e.target, e.confidence) for e in result.edges if e.relation == "inherits"}
+        assert ("models.py::User", "models.py::Base", "EXTRACTED") in inherits
+        assert ("models.py::Base", "DeclarativeBase", "INFERRED") in inherits
+
+    def test_route_handles_edge_to_handler_function(self):
+        code = """
+@app.get("/users")
+def list_users():
+    return []
+"""
+        result = self.extractor.extract("main.py", code)
+        handles = [e for e in result.edges if e.relation == "handles"]
+        assert len(handles) == 1
+        assert handles[0].source == "main.py::route::/users"
+        assert handles[0].target == "main.py::list_users"
+        assert handles[0].confidence == "EXTRACTED"
+        # The function node itself keeps its own type — it isn't overwritten
+        # into the route node.
+        list_users_node = next(n for n in result.nodes if n.id == "main.py::list_users")
+        assert list_users_node.type == "function"
+        assert list_users_node.label == "list_users"
+
     def test_handles_syntax_errors_gracefully(self):
         code = "def broken(:\n    this is not +++ valid ///"
         result = self.extractor.extract("broken.py", code)
@@ -127,6 +159,53 @@ class TestTypeScriptExtractor:
         assert len(routes) == 1
         assert routes[0].label == "/users"
 
+    def test_this_method_call_resolves_extracted_same_class(self):
+        code = """export class UserRepository {
+  find(id: number) {
+    return this.helper(id);
+  }
+
+  helper(id: number) {
+    return id;
+  }
+}
+"""
+        result = self.extractor.extract("app.ts", code)
+        calls = [e for e in result.edges if e.relation == "calls"]
+        assert len(calls) == 1
+        assert calls[0].source == "app.ts::UserRepository::find"
+        assert calls[0].target == "app.ts::UserRepository::helper"
+        assert calls[0].confidence == "EXTRACTED"
+
+    def test_this_method_call_before_definition_still_resolves(self):
+        # `find` is defined before `helper` in source order — the call must
+        # still resolve EXTRACTED, not fall back to a bare-label INFERRED edge.
+        code = """export class UserRepository {
+  find(id: number) {
+    return this.helper(id);
+  }
+  helper(id: number) {
+    return id;
+  }
+}
+"""
+        result = self.extractor.extract("app.ts", code)
+        calls = [e for e in result.edges if e.relation == "calls"]
+        assert calls[0].confidence == "EXTRACTED"
+
+    def test_this_call_to_unknown_method_is_inferred(self):
+        code = """export class Foo {
+  bar() {
+    return this.notDefinedAnywhere();
+  }
+}
+"""
+        result = self.extractor.extract("foo.ts", code)
+        calls = [e for e in result.edges if e.relation == "calls"]
+        assert len(calls) == 1
+        assert calls[0].target == "notDefinedAnywhere"
+        assert calls[0].confidence == "INFERRED"
+
     def test_detects_import_statement(self):
         code = 'import { Foo } from "./foo";\n'
         result = self.extractor.extract("app.ts", code)
@@ -168,6 +247,26 @@ class TestGraphBuilder:
         G = build_graph(extractions)
         assert "a.py" in G.nodes
 
+    def test_no_self_loop_edges(self):
+        # An import node's own label matches the bare name it "imports",
+        # which used to resolve back to itself via the label index.
+        files = {"main.py": "from fastapi import FastAPI\n"}
+        extractions = extract_all(files)
+        G = build_graph(extractions)
+        assert list(nx.selfloop_edges(G)) == []
+
+    def test_no_self_loop_edges_with_cross_file_name_collision(self):
+        # Two files each define something literally labeled "helper" — the
+        # import self-loop bug and the name-collision label resolution can
+        # interact; neither should ever produce a self-loop.
+        files = {
+            "a.py": "def helper():\n    pass\n",
+            "b.py": "def helper():\n    pass\n",
+        }
+        extractions = extract_all(files)
+        G = build_graph(extractions)
+        assert list(nx.selfloop_edges(G)) == []
+
     def test_god_nodes_returns_top_n_by_degree(self):
         G = nx.Graph()
         G.add_node("hub", label="hub", type="module", source_file="x.py")
@@ -179,6 +278,25 @@ class TestGraphBuilder:
         assert len(god_nodes) == 1
         assert god_nodes[0]["id"] == "hub"
         assert god_nodes[0]["degree"] == 5
+
+    def test_edge_direction_survives_undirected_storage(self):
+        # G is an undirected nx.Graph, so NetworkX may hand back a stored
+        # edge as (u, v) or (v, u) depending on internal iteration order.
+        # The edge's own "source"/"target" attributes must always reflect
+        # the extractor's intended direction regardless of that ordering.
+        files = {
+            "models.py": (
+                "from sqlalchemy.orm import DeclarativeBase\n\n\n"
+                "class Base(DeclarativeBase):\n    pass\n\n\n"
+                "class User(Base):\n    id: int\n"
+            ),
+        }
+        extractions = extract_all(files)
+        G = build_graph(extractions)
+        inherits = [data for _, _, data in G.edges(data=True) if data["relation"] == "inherits"]
+        by_target_label = {data["target"].rsplit("::", 1)[-1]: data for data in inherits}
+        assert by_target_label["Base"]["source"] == "models.py::User"
+        assert by_target_label["Base"]["confidence"] == "EXTRACTED"
 
 
 class TestCommunityDetection:

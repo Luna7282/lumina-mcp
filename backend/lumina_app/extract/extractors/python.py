@@ -161,8 +161,6 @@ class PythonExtractor(TreeSitterExtractor):
         result.edges.append(Edge(source=parent_id, target=class_id, relation="contains", confidence="EXTRACTED"))
 
         for base in base_names:
-            if base in _MODEL_BASE_NAMES:
-                continue
             target = symbols.get(base, base)
             confidence = "EXTRACTED" if base in symbols else "INFERRED"
             result.edges.append(
@@ -200,7 +198,6 @@ class PythonExtractor(TreeSitterExtractor):
             deco_name = self._decorator_call_name(decorator, source)
             if deco_name and self._is_route_decorator(deco_name):
                 route_path = self._decorator_route_path(decorator, source) or "/"
-                node_type = "route"
 
         body = node.child_by_field_name("body")
         docstring = self._docstring(body, source) if body else ""
@@ -208,7 +205,7 @@ class PythonExtractor(TreeSitterExtractor):
         result.nodes.append(
             SchemaNode(
                 id=func_id,
-                label=route_path if route_path is not None else func_name,
+                label=func_name,
                 type=node_type,
                 source_file=filepath,
                 source_location=self.node_location(node),
@@ -216,6 +213,24 @@ class PythonExtractor(TreeSitterExtractor):
             )
         )
         result.edges.append(Edge(source=parent_id, target=func_id, relation="contains", confidence="EXTRACTED"))
+
+        if route_path is not None:
+            route_id = self.make_node_id(filepath, "route", route_path)
+            result.nodes.append(
+                SchemaNode(
+                    id=route_id,
+                    label=route_path,
+                    type="route",
+                    source_file=filepath,
+                    source_location=self.node_location(node),
+                )
+            )
+            result.edges.append(
+                Edge(source=parent_id, target=route_id, relation="contains", confidence="EXTRACTED")
+            )
+            result.edges.append(
+                Edge(source=route_id, target=func_id, relation="handles", confidence="EXTRACTED")
+            )
 
         if body is not None:
             for call in self.find_descendants_by_type(body, "call"):

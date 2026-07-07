@@ -10,7 +10,7 @@ Confidence = Literal["EXTRACTED", "INFERRED", "AMBIGUOUS"]
 
 Relation = Literal[
     "calls", "imports", "defines", "inherits",
-    "uses", "contains", "implements", "decorates",
+    "uses", "contains", "implements", "decorates", "handles",
 ]
 
 
