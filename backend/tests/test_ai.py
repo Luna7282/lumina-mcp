@@ -45,8 +45,24 @@ def _mock_anthropic_client(mocker, text: str, side_effect: Exception | None = No
         mock_client.messages.create = AsyncMock(side_effect=side_effect)
     else:
         mock_message = MagicMock()
-        mock_message.content = [MagicMock(text=text)]
+        mock_message.content = [MagicMock(type="text", text=text)]
         mock_client.messages.create = AsyncMock(return_value=mock_message)
+    return mock_client
+
+
+def _mock_anthropic_client_with_thinking(mocker, text: str):
+    """Like _mock_anthropic_client, but prepends a `thinking` block before
+    the text block — reproducing claude-sonnet-5's real response shape when
+    adaptive thinking (on by default) triggers. content[0] is NOT the
+    answer in this case; callers must find the first type=="text" block."""
+    mock_client_class = mocker.patch("anthropic.AsyncAnthropic")
+    mock_client = mock_client_class.return_value
+    mock_message = MagicMock()
+    mock_message.content = [
+        MagicMock(type="thinking", text=None, thinking="reasoning about the answer..."),
+        MagicMock(type="text", text=text),
+    ]
+    mock_client.messages.create = AsyncMock(return_value=mock_message)
     return mock_client
 
 
@@ -56,6 +72,15 @@ class TestSummarizeFile:
         nodes = [{"type": "route", "label": "/users"}]
         summary = await summarize_file("main.py", nodes, [])
         assert summary == "This file defines the FastAPI app and a route."
+
+    async def test_returns_api_text_when_response_leads_with_thinking_block(self, mocker):
+        # claude-sonnet-5/haiku may run adaptive thinking and put a
+        # `thinking` block at content[0] with text=None — the real answer
+        # is the first type=="text" block, not necessarily content[0].
+        _mock_anthropic_client_with_thinking(mocker, "Summary after thinking.")
+        nodes = [{"type": "function", "label": "f"}]
+        summary = await summarize_file("main.py", nodes, [])
+        assert summary == "Summary after thinking."
 
     async def test_returns_fallback_on_api_error(self, mocker):
         _mock_anthropic_client(mocker, "", side_effect=Exception("network error"))
@@ -140,6 +165,16 @@ class TestPlanVisualization:
         assert "UserService" in plans[0].description
         assert plans[0].relevant_files == ["main.py"]
 
+    async def test_parses_json_when_response_leads_with_thinking_block(self, mocker):
+        # Regression test: claude-sonnet-5 runs adaptive thinking by default
+        # and this prompt is complex enough to trigger it in practice — a
+        # `thinking` block at content[0] must not be mistaken for "no
+        # response" and fall back to CodebaseOverview.
+        plans_json = '[{"scene_name": "RealPlan", "title": "Real", "description": "d", "relevant_files": []}]'
+        _mock_anthropic_client_with_thinking(mocker, plans_json)
+        plans = await plan_visualization({"god_nodes": [], "community_summary": {}, "language_summary": {}}, {})
+        assert plans[0].scene_name == "RealPlan"
+
 
 class TestGenerateScene:
     async def test_strips_markdown_fences_correctly(self, mocker):
@@ -156,6 +191,16 @@ class TestGenerateScene:
         code = await generate_scene(plan, {}, {"nodes": [], "edges": []})
         assert not code.startswith("```")
         assert not code.endswith("```")
+        assert "class MyScene(Scene):" in code
+
+    async def test_extracts_code_when_response_leads_with_thinking_block(self, mocker):
+        # Regression test for the same content[0]-is-thinking issue as
+        # summarizer/planner — generator hits it too since it also uses
+        # claude-sonnet-5.
+        code_text = "from manim import *\n\nclass MyScene(Scene):\n    def construct(self):\n        self.wait(1)\n"
+        _mock_anthropic_client_with_thinking(mocker, code_text)
+        plan = ScenePlan(scene_name="MyScene", title="My Scene", description="d", relevant_files=[])
+        code = await generate_scene(plan, {}, {"nodes": [], "edges": []})
         assert "class MyScene(Scene):" in code
 
     async def test_returns_fallback_after_two_failed_attempts(self, mocker):

@@ -5,6 +5,21 @@ import anthropic
 from lumina_app.settings import settings
 
 
+def _extract_text(message) -> str:
+    """Return the first text block's content.
+
+    claude-sonnet-5 (and other 4.6+ models) run adaptive thinking by
+    default, so content[0] is often a `thinking` block rather than the
+    answer — content[0].text is then None, not a "no response" signal.
+    Find the first block that's actually type=="text" instead of assuming
+    position 0.
+    """
+    for block in message.content:
+        if block.type == "text":
+            return block.text
+    return ""
+
+
 async def summarize_file(
     path: str,
     nodes: list[dict],
@@ -53,7 +68,7 @@ async def summarize_file(
             ),
             messages=[{"role": "user", "content": context}],
         )
-        return message.content[0].text.strip()
+        return _extract_text(message).strip()
     except Exception:
         parts = []
         if classes:

@@ -4,6 +4,20 @@ from lumina_app.ai.planner import ScenePlan
 from lumina_app.settings import settings
 
 
+def _extract_text(message) -> str:
+    """Return the first text block's content.
+
+    claude-sonnet-5 runs adaptive thinking by default, so content[0] is
+    often a `thinking` block rather than the answer — content[0].text is
+    then None, not a "no response" signal. Find the first block that's
+    actually type=="text" instead of assuming position 0.
+    """
+    for block in message.content:
+        if block.type == "text":
+            return block.text
+    return ""
+
+
 def _strip_fences(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
@@ -93,7 +107,7 @@ STRICT RULES:
                 system=system,
                 messages=[{"role": "user", "content": user_message}],
             )
-            code = _strip_fences(message.content[0].text)
+            code = _strip_fences(_extract_text(message))
             if f"class {plan.scene_name}(Scene):" in code:
                 return code
             # Scene name not found — retry once

@@ -6,6 +6,20 @@ import anthropic
 from lumina_app.settings import settings
 
 
+def _extract_text(message) -> str:
+    """Return the first text block's content.
+
+    claude-sonnet-5 runs adaptive thinking by default, so content[0] is
+    often a `thinking` block rather than the answer — content[0].text is
+    then None, not a "no response" signal. Find the first block that's
+    actually type=="text" instead of assuming position 0.
+    """
+    for block in message.content:
+        if block.type == "text":
+            return block.text
+    return ""
+
+
 @dataclass
 class ScenePlan:
     scene_name: str
@@ -76,7 +90,7 @@ Return a JSON array of 3-5 scene plans. Each element:
             ),
             messages=[{"role": "user", "content": user_message}],
         )
-        raw = message.content[0].text.strip()
+        raw = _extract_text(message).strip()
         raw = raw.replace("```json", "").replace("```", "").strip()
         plans_data = json.loads(raw)
         return [ScenePlan(**p) for p in plans_data]
