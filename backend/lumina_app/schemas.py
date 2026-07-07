@@ -79,10 +79,5 @@ class AnalyzeResponse(BaseModel):
     cached: bool  # True if this content_hash was already analyzed
 
 
-class ExplainRequest(BaseModel):
-    codebase_id: uuid.UUID
-    focus: str = "overview"
-
-
 class DocsRequest(BaseModel):
     codebase_id: uuid.UUID

@@ -1,69 +1,98 @@
 import json
+from dataclasses import dataclass, field
 
 import anthropic
 
-from lumina_app.parser.base import CodebaseGraph
 from lumina_app.settings import settings
 
-_SYSTEM_PROMPT = (
-    "You are a visualization planner for a codebase-explainer video tool. "
-    "Given a codebase's architectural graph (files, edges, layers) and a "
-    "focus area, produce a structured storyboard plan: an ordered list of "
-    "scenes, each with a title, a short narration script, and the files or "
-    "layers it should highlight. Respond with JSON only, matching this "
-    'shape: {"scenes": [{"title": str, "narration": str, "highlights": '
-    "[str]}]}."
-)
 
-_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "scenes": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string"},
-                    "narration": {"type": "string"},
-                    "highlights": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["title", "narration", "highlights"],
-                "additionalProperties": False,
-            },
-        }
-    },
-    "required": ["scenes"],
-    "additionalProperties": False,
-}
+@dataclass
+class ScenePlan:
+    scene_name: str
+    title: str
+    description: str
+    relevant_files: list[str] = field(default_factory=list)
+    community_id: int | None = None
 
 
-def _graph_summary(graph: CodebaseGraph) -> str:
-    layer_lines = [f"- {layer}: {len(paths)} files" for layer, paths in graph.layers.items()]
-    edge_lines = [f"- {e.source} -> {e.target} ({e.kind})" for e in graph.edges[:100]]
-    return (
-        f"Language summary: {json.dumps(graph.language_summary)}\n"
-        f"Layers:\n" + "\n".join(layer_lines) + "\n\n"
-        f"Sample edges:\n" + "\n".join(edge_lines)
+async def plan_visualization(
+    graph: dict,
+    summaries: dict[str, str],
+    focus: str | None = None,
+) -> list[ScenePlan]:
+    god_nodes = graph.get("god_nodes", [])[:5]
+    community_summary = graph.get("community_summary", {})
+    language_summary = graph.get("language_summary", {})
+
+    lang_str = ", ".join(f"{lang}: {count} file(s)" for lang, count in language_summary.items())
+
+    god_str = "\n".join(
+        f"  - {n['label']} ({n['type']}, degree {n['degree']}, in {n['source_file']})" for n in god_nodes
     )
 
+    community_str = "\n".join(
+        f"  Community {cid}: {info['size']} nodes, "
+        f"top: {', '.join(info['top_nodes'][:3])}, "
+        f"files: {', '.join(info['files'][:3])}"
+        for cid, info in community_summary.items()
+    )
 
-async def plan_video(graph: CodebaseGraph, focus: str) -> dict:
-    """Produce a scene-by-scene storyboard plan for a codebase explainer video."""
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-    response = await client.messages.create(
-        model=settings.anthropic_model_smart,
-        max_tokens=4096,
-        system=_SYSTEM_PROMPT,
-        output_config={"format": {"type": "json_schema", "schema": _SCHEMA}},
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"Focus: {focus}\n\n"
-                    f"Codebase graph summary:\n{_graph_summary(graph)}"
+    summaries_str = "\n".join(f"  {path}: {summary}" for path, summary in list(summaries.items())[:20])
+
+    focus_hint = f"\nFocus on: {focus}" if focus else ""
+
+    user_message = f"""Languages: {lang_str}
+
+Architectural hubs (god nodes):
+{god_str}
+
+Code communities (Leiden clusters):
+{community_str}
+
+File summaries:
+{summaries_str}{focus_hint}
+
+Return a JSON array of 3-5 scene plans. Each element:
+{{
+  "scene_name": "ValidPythonClassName",
+  "title": "Human Readable Title",
+  "description": "What this scene shows and why it matters",
+  "relevant_files": ["file1.py", "file2.ts"],
+  "community_id": 0
+}}"""
+
+    try:
+        client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        message = await client.messages.create(
+            model=settings.anthropic_model_smart,
+            max_tokens=1000,
+            system=(
+                "You are a technical visualization expert. "
+                "Plan 3-5 Manim animation scenes that explain "
+                "a codebase's architecture. Each scene should "
+                "illuminate one key concept. "
+                "Return ONLY valid JSON array, no markdown, "
+                "no explanation."
+            ),
+            messages=[{"role": "user", "content": user_message}],
+        )
+        raw = message.content[0].text.strip()
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        plans_data = json.loads(raw)
+        return [ScenePlan(**p) for p in plans_data]
+
+    except Exception:
+        # Fallback: one overview scene
+        all_files = list(summaries.keys())[:5]
+        top_labels = [n["label"] for n in god_nodes[:3]]
+        return [
+            ScenePlan(
+                scene_name="CodebaseOverview",
+                title="Codebase Architecture Overview",
+                description=(
+                    f"High-level overview showing the main components: {', '.join(top_labels)}"
                 ),
-            }
-        ],
-    )
-    text = next((b.text for b in response.content if b.type == "text"), "{}")
-    return json.loads(text)
+                relevant_files=all_files,
+                community_id=None,
+            )
+        ]

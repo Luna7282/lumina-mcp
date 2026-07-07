@@ -1,40 +1,53 @@
-from dataclasses import dataclass
+import asyncio
+from uuid import UUID
 
 from lumina_app.settings import settings
 
 
-@dataclass
-class RenderJob:
-    job_id: str
-    status: str
-    video_url: str | None = None
+async def render_and_save(
+    video_id: str,
+    code: str,
+    quality: str,
+) -> None:
+    """Submit a Manim scene for rendering and persist the result.
 
+    Runs as a FastAPI BackgroundTask *after* the request's response has
+    already been sent — the request-scoped DB session from that request is
+    closed by then, so this opens its own fresh session via
+    AsyncSessionLocal rather than accepting one as a parameter.
+    """
+    from lumina_app.database import AsyncSessionLocal
+    from lumina_app.models import CodebaseVideo
 
-class ManimRenderer:
-    """Thin wrapper around the manim-studio-sdk rendering API."""
+    try:
+        from manimstudio import ManimStudio
 
-    def __init__(self, api_key: str | None = None, base_url: str | None = None) -> None:
-        self._api_key = api_key or settings.manimstudio_api_key
-        self._base_url = base_url or settings.manimstudio_base_url
-        self._client = None
+        client = ManimStudio(
+            api_key=settings.manimstudio_api_key,
+            base_url=settings.manimstudio_base_url,
+        )
 
-    def _get_client(self):
-        if self._client is None:
-            import manimstudio  # imported lazily so the module can be inspected/tested
+        # ManimStudio's render()/wait() are blocking synchronous calls
+        # (they poll over time.sleep) — run them in a thread pool so they
+        # don't block the event loop.
+        def blocking_render():
+            job = client.render(code, quality=quality)
+            job.wait(timeout=1800)  # 30 min max
+            return job.url, job.job_id
 
-            self._client = manimstudio.Client(
-                api_key=self._api_key, base_url=self._base_url
-            )
-        return self._client
+        url, job_id = await asyncio.get_event_loop().run_in_executor(None, blocking_render)
 
-    async def submit(self, scene_code: str) -> RenderJob:
-        """Submit Manim scene source code for rendering and return the job handle."""
-        client = self._get_client()
-        job = await client.renders.create(code=scene_code)
-        return RenderJob(job_id=job.id, status=job.status)
+        async with AsyncSessionLocal() as db:
+            video = await db.get(CodebaseVideo, UUID(video_id))
+            if video:
+                video.status = "done"
+                video.video_url = url
+                video.render_job_id = job_id
+                await db.commit()
 
-    async def poll(self, job_id: str) -> RenderJob:
-        """Poll a render job for its current status and, once ready, video URL."""
-        client = self._get_client()
-        job = await client.renders.retrieve(job_id)
-        return RenderJob(job_id=job.id, status=job.status, video_url=getattr(job, "video_url", None))
+    except Exception:
+        async with AsyncSessionLocal() as db:
+            video = await db.get(CodebaseVideo, UUID(video_id))
+            if video:
+                video.status = "error"
+                await db.commit()

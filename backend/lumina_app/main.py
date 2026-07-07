@@ -1,16 +1,20 @@
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumina_app.ai.generator import generate_scene
+from lumina_app.ai.planner import plan_visualization
+from lumina_app.ai.summarizer import summarize_codebase
 from lumina_app.database import create_all_tables, get_db
 from lumina_app.extract.cache import codebase_hash, compute_hashes
 from lumina_app.extract.cluster import detect_communities, get_community_summary
 from lumina_app.extract.dispatch import extract_all
 from lumina_app.extract.graph import build_graph, get_god_nodes, get_language_summary
-from lumina_app.models import Codebase, CodebaseFile
+from lumina_app.models import Codebase, CodebaseFile, CodebaseVideo
 from lumina_app.schemas import AnalyzeRequest, AnalyzeResponse, CodebaseRead
 from lumina_app.settings import settings
 
@@ -140,10 +144,113 @@ async def analyze_codebase(
     )
 
 
-@app.post("/api/explain")
-async def explain_codebase():
-    """Generate video explanation for a codebase."""
-    return {"status": "not_implemented"}
+class ExplainRequest(BaseModel):
+    codebase_id: str
+    focus: str | None = None
+    quality: str = "low"
+
+
+class ExplainResponse(BaseModel):
+    video_id: str
+    status: str
+    video_url: str | None = None
+    scenes: list[str]
+    codebase_id: str
+
+
+@app.post("/api/explain", response_model=ExplainResponse)
+async def explain_codebase(
+    request: ExplainRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate video explanation for a codebase: summarize files, plan
+    scenes, generate Manim code, then render in the background."""
+    codebase = await db.get(Codebase, uuid.UUID(request.codebase_id))
+    if not codebase:
+        raise HTTPException(404, "Codebase not found")
+
+    # Load file records from DB
+    files_result = await db.execute(select(CodebaseFile).where(CodebaseFile.codebase_id == codebase.id))
+    db_files = files_result.scalars().all()
+
+    # Summarize (uses cache)
+    summaries = await summarize_codebase(codebase.graph, db_files, db)
+    await db.commit()
+
+    # Plan scenes
+    scene_plans = await plan_visualization(codebase.graph, summaries, request.focus)
+
+    # Generate Manim code
+    scene_codes = []
+    for plan in scene_plans:
+        code = await generate_scene(plan, summaries, codebase.graph)
+        scene_codes.append(code)
+
+    # Combine — remove duplicate "from manim import *" lines
+    combined_parts = []
+    header_added = False
+    for code in scene_codes:
+        lines = code.split("\n")
+        for line in lines:
+            if line.strip() == "from manim import *":
+                if not header_added:
+                    combined_parts.append(line)
+                    header_added = True
+                # skip duplicate imports
+            else:
+                combined_parts.append(line)
+        combined_parts.append("")  # blank line between scenes
+
+    combined = "\n".join(combined_parts)
+
+    # Create video record
+    video = CodebaseVideo(
+        codebase_id=codebase.id,
+        focus=request.focus or "overview",
+        manim_code=combined,
+        status="rendering",
+    )
+    db.add(video)
+    await db.commit()
+    await db.refresh(video)
+
+    # Render in background. render_and_save opens its own DB session rather
+    # than reusing this request's `db` — by the time a BackgroundTask runs,
+    # the request-scoped session from Depends(get_db) has already been
+    # closed, so passing it through here would risk an intermittent
+    # "session is closed" failure once rendering actually completes.
+    video_id = str(video.id)
+    quality = request.quality
+
+    async def do_render():
+        from lumina_app.renderer import render_and_save
+
+        await render_and_save(video_id, combined, quality)
+
+    background_tasks.add_task(do_render)
+
+    return ExplainResponse(
+        video_id=video_id,
+        status="rendering",
+        scenes=[p.scene_name for p in scene_plans],
+        codebase_id=request.codebase_id,
+    )
+
+
+@app.get("/api/video/{video_id}")
+async def get_video(video_id: str, db: AsyncSession = Depends(get_db)):
+    video = await db.get(CodebaseVideo, uuid.UUID(video_id))
+    if not video:
+        raise HTTPException(404, "Video not found")
+    return {
+        "video_id": str(video.id),
+        "status": video.status,
+        "video_url": video.video_url,
+        "focus": video.focus,
+        "codebase_id": str(video.codebase_id),
+        "created_at": video.created_at.isoformat(),
+    }
 
 
 @app.post("/api/docs")
