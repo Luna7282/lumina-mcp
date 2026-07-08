@@ -58,29 +58,44 @@ explain_codebase(codebase_id=id, focus="API routes")
 generate_docs(codebase_id=id, doc_type="architecture")
 ```
 
-## Full onboarding package
+## Full onboarding package (recommended first step)
 
-Generate everything at once — videos + docs for the whole codebase:
+Generates everything and saves to project-docs/ folder:
+- One long multi-scene overview video (entire architecture)
+- One video per major folder (backend, worker, frontend, etc.)
+- ARCHITECTURE.md, ONBOARDING.md, API.md
+- docs/backend/README.md, docs/worker/README.md, etc.
+- index.md linking everything
 ```
 create_onboarding_package(
   path=".",
   package_type="full",
-  custom_instructions="This is a Manim rendering SaaS.
-    Emphasize the sandbox security and render pipeline.",
   quality="low",
+  save_to_disk=True,
 )
 ```
 
-This generates in parallel:
-- One focused video per architectural layer (3-5 videos)
-- ARCHITECTURE.md
-- ONBOARDING.md
-- API.md
+All outputs saved to `./project-docs/` automatically.
 
-For a quick overview:
+## Deep dive into one folder
+
+After getting the overview, understand one folder in depth:
+```
+explain_folder(
+  folder_path="backend",
+  project_path=".",
+)
+```
+
+Generates a focused video + README just for that folder.
+Saved to `project-docs/videos/` and `project-docs/docs/backend/`.
+
+## Quick overview only
 ```
 create_onboarding_package(path=".", package_type="quick")
 ```
+
+One overview video + README only — no per-folder deep-dives.
 
 Pass `wait=False` to get a `package_id` back immediately instead of
 blocking, then poll with `get_package_status(package_id)`.

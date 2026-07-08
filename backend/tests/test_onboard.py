@@ -6,11 +6,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from lumina_app.ai.planner import ScenePlan, plan_onboarding_videos
+from lumina_app.ai.planner import detect_folders, plan_folder_videos, plan_onboarding_videos
 from lumina_app.database import AsyncSessionLocal, create_all_tables
 from lumina_app.main import app
 from lumina_app.models import OnboardingPackage
-from lumina_app.onboarding import _update_package_item
+from lumina_app.onboarding import _update_package_item, generate_package
 
 TEST_DB_FILE = "./test.db"
 
@@ -53,26 +53,21 @@ def _mock_anthropic_client(mocker, text: str, side_effect: Exception | None = No
     return mock_client
 
 
-SAMPLE_VIDEO_PLANS = [
-    ScenePlan(scene_name="AuthFlow", title="Auth Flow", description="d", relevant_files=["main.py"]),
-]
-
-
-def _patch_onboard_pipeline(mocker, video_plans=None, doc_types=None):
+def _patch_onboard_pipeline(mocker):
     mocker.patch(
         "lumina_app.main.summarize_codebase",
         new_callable=AsyncMock,
         return_value={"main.py": "Defines the app.", "models.py": "Defines User."},
     )
-    mocker.patch(
-        "lumina_app.main.plan_onboarding_videos",
-        new_callable=AsyncMock,
-        return_value=video_plans if video_plans is not None else SAMPLE_VIDEO_PLANS,
-    )
-    mocker.patch("lumina_app.main.generate_package", new_callable=AsyncMock)
+    return mocker.patch("lumina_app.main.generate_package", new_callable=AsyncMock)
 
 
 class TestOnboardEndpoint:
+    """Planning (folders, video/doc plans) now happens inside the
+    generate_package background task rather than in the request handler,
+    so the immediate response only carries an empty videos/docs list —
+    they fill in once the (here, mocked-out) background task runs."""
+
     def test_valid_codebase_id_returns_generating(self, client, mocker):
         analyze_response = client.post("/api/analyze", json={"name": "demo", "files": SAMPLE_FILES})
         codebase_id = analyze_response.json()["codebase_id"]
@@ -85,9 +80,8 @@ class TestOnboardEndpoint:
         assert data["status"] == "generating"
         assert data["codebase_id"] == codebase_id
         assert "package_id" in data
-        assert data["videos"][0]["focus"] == "Auth Flow"
-        assert data["videos"][0]["status"] == "pending"
-        assert len(data["docs"]) == 3  # full → architecture, onboarding, api
+        assert data["videos"] == []
+        assert data["docs"] == []
 
     def test_invalid_codebase_id_returns_404(self, client, mocker):
         _patch_onboard_pipeline(mocker)
@@ -108,28 +102,52 @@ class TestOnboardEndpoint:
 
         assert response.status_code == 422
 
-    def test_quick_package_type_generates_one_doc(self, client, mocker):
+    def test_background_task_receives_package_type_and_instructions(self, client, mocker):
         analyze_response = client.post("/api/analyze", json={"name": "demo", "files": SAMPLE_FILES})
         codebase_id = analyze_response.json()["codebase_id"]
-        _patch_onboard_pipeline(mocker)
+        generate_package_mock = _patch_onboard_pipeline(mocker)
 
-        response = client.post(
-            "/api/onboard", json={"codebase_id": codebase_id, "package_type": "quick"}
+        client.post(
+            "/api/onboard",
+            json={
+                "codebase_id": codebase_id,
+                "package_type": "technical",
+                "custom_instructions": "Emphasize the render pipeline.",
+            },
         )
 
-        data = response.json()
-        assert len(data["docs"]) == 1
-        assert data["docs"][0]["doc_type"] == "readme"
+        assert generate_package_mock.await_args.args[3] == "technical"
+        assert generate_package_mock.await_args.args[4] == "Emphasize the render pipeline."
 
 
 class TestGetPackageEndpoint:
-    def test_returns_correct_shape(self, client, mocker):
-        analyze_response = client.post("/api/analyze", json={"name": "demo", "files": SAMPLE_FILES})
-        codebase_id = analyze_response.json()["codebase_id"]
-        _patch_onboard_pipeline(mocker)
+    async def _create_package(self, package_type="full", videos=None, docs=None):
+        async with AsyncSessionLocal() as session:
+            pkg = OnboardingPackage(
+                codebase_id=uuid.uuid4(),
+                package_type=package_type,
+                status="generating",
+                videos=videos or [],
+                docs=docs or [],
+            )
+            session.add(pkg)
+            await session.commit()
+            await session.refresh(pkg)
+            return str(pkg.id), str(pkg.codebase_id)
 
-        onboard_response = client.post("/api/onboard", json={"codebase_id": codebase_id})
-        package_id = onboard_response.json()["package_id"]
+    async def test_returns_correct_shape(self, client):
+        package_id, codebase_id = await self._create_package(
+            docs=[
+                {"doc_type": "readme", "filename": None, "content": None, "status": "pending", "folder": None},
+                {
+                    "doc_type": "readme",
+                    "filename": "docs/backend/README.md",
+                    "content": "# Backend",
+                    "status": "done",
+                    "folder": "backend",
+                },
+            ],
+        )
 
         response = client.get(f"/api/package/{package_id}")
 
@@ -140,11 +158,14 @@ class TestGetPackageEndpoint:
         assert data["codebase_id"] == codebase_id
         assert data["package_type"] == "full"
         assert isinstance(data["videos"], list)
-        assert isinstance(data["docs"], list)
-        for doc in data["docs"]:
-            assert doc["status"] == "pending"
-            assert doc["content"] is None
-            assert doc["word_count"] == 0
+        assert data["docs"][0]["status"] == "pending"
+        assert data["docs"][0]["content"] is None
+        assert data["docs"][0]["word_count"] == 0
+        assert data["docs"][0]["folder"] is None
+        assert data["docs"][1]["status"] == "done"
+        assert data["docs"][1]["content"] == "# Backend"
+        assert data["docs"][1]["folder"] == "backend"
+        assert data["docs"][1]["word_count"] == 2
         assert "created_at" in data
         assert data["completed_at"] is None
 
@@ -154,7 +175,210 @@ class TestGetPackageEndpoint:
         assert response.status_code == 404
 
 
+class TestDetectFolders:
+    def test_returns_folders_sorted_by_file_count_descending(self):
+        graph = {
+            "nodes": [
+                {"source_file": "backend/main.py"},
+                {"source_file": "backend/models.py"},
+                {"source_file": "backend/utils.py"},
+                {"source_file": "worker/render.py"},
+                {"source_file": "worker/queue.py"},
+            ]
+        }
+        assert detect_folders(graph) == ["backend", "worker"]
+
+    def test_skips_root_level_files(self):
+        graph = {
+            "nodes": [
+                {"source_file": "main.py"},
+                {"source_file": "README.md"},
+                {"source_file": "backend/app.py"},
+                {"source_file": "backend/db.py"},
+            ]
+        }
+        folders = detect_folders(graph)
+        assert folders == ["backend"]
+
+    def test_skips_folders_with_only_one_file(self):
+        graph = {
+            "nodes": [
+                {"source_file": "docs/README.md"},
+                {"source_file": "backend/app.py"},
+                {"source_file": "backend/db.py"},
+            ]
+        }
+        folders = detect_folders(graph)
+        assert folders == ["backend"]
+        assert "docs" not in folders
+
+    def test_handles_backslash_paths(self):
+        graph = {
+            "nodes": [
+                {"source_file": "backend\\main.py"},
+                {"source_file": "backend\\models.py"},
+            ]
+        }
+        assert detect_folders(graph) == ["backend"]
+
+
+class TestPlanFolderVideos:
+    async def test_returns_one_plan_per_folder(self):
+        graph = {
+            "nodes": [
+                {"source_file": "backend/main.py", "label": "f", "type": "function"},
+                {"source_file": "worker/render.py", "label": "g", "type": "function"},
+            ]
+        }
+        summaries = {"backend/main.py": "s1", "worker/render.py": "s2"}
+        plans = await plan_folder_videos(graph, summaries, ["backend", "worker"])
+
+        assert len(plans) == 2
+        assert {p.scene_name for p in plans} == {"BackendFolderOverview", "WorkerFolderOverview"}
+        assert all(p.relevant_files for p in plans)
+
+    async def test_caps_at_five_even_if_more_folders_given(self):
+        folders = [f"folder{i}" for i in range(8)]
+        plans = await plan_folder_videos({"nodes": []}, {}, folders)
+        assert len(plans) == 5
+
+
+class TestGeneratePackage:
+    async def test_creates_overview_and_folder_videos(self, mocker):
+        _remove_test_db()
+        await create_all_tables()
+        try:
+            mocker.patch(
+                "lumina_app.onboarding.generate_scene",
+                new_callable=AsyncMock,
+                return_value=(
+                    "from manim import *\n\nclass X(Scene):\n    def construct(self):\n        pass\n"
+                ),
+            )
+            mocker.patch(
+                "lumina_app.onboarding.submit_render",
+                new_callable=AsyncMock,
+                return_value=("https://example.com/v.mp4", "job-123"),
+            )
+            mocker.patch(
+                "lumina_app.onboarding.generate_docs",
+                new_callable=AsyncMock,
+                return_value="# Doc",
+            )
+
+            graph = {
+                "nodes": [
+                    {"source_file": "backend/main.py", "label": "f", "type": "function"},
+                    {"source_file": "backend/models.py", "label": "User", "type": "class"},
+                    {"source_file": "worker/render.py", "label": "g", "type": "function"},
+                    {"source_file": "worker/queue.py", "label": "Q", "type": "class"},
+                ],
+                "edges": [],
+                "god_nodes": [],
+                "community_summary": {},
+                "language_summary": {"python": 4},
+            }
+            summaries = {
+                "backend/main.py": "s1",
+                "backend/models.py": "s2",
+                "worker/render.py": "s3",
+                "worker/queue.py": "s4",
+            }
+
+            async with AsyncSessionLocal() as session:
+                pkg = OnboardingPackage(codebase_id=uuid.uuid4(), videos=[], docs=[])
+                session.add(pkg)
+                await session.commit()
+                await session.refresh(pkg)
+                package_id = str(pkg.id)
+
+            await generate_package(package_id, graph, summaries, "full", None, "low")
+
+            async with AsyncSessionLocal() as session:
+                refreshed = await session.get(OnboardingPackage, uuid.UUID(package_id))
+
+            assert refreshed.status == "done"
+            assert refreshed.completed_at is not None
+
+            videos = refreshed.videos
+            assert len(videos) == 3  # overview + backend + worker
+            assert videos[0]["is_overview"] is True
+            assert videos[0]["folder"] is None
+            assert videos[0]["status"] == "done"
+
+            folder_videos = videos[1:]
+            assert {v["folder"] for v in folder_videos} == {"backend", "worker"}
+            assert all(v["is_overview"] is False for v in folder_videos)
+            assert all(v["status"] == "done" for v in videos)
+
+            docs = refreshed.docs
+            main_docs = [d for d in docs if d["folder"] is None]
+            folder_docs = [d for d in docs if d["folder"] is not None]
+            assert {d["doc_type"] for d in main_docs} == {"architecture", "onboarding", "api"}
+            assert {d["folder"] for d in folder_docs} == {"backend", "worker"}
+            assert all(d["status"] == "done" for d in docs)
+        finally:
+            _remove_test_db()
+
+    async def test_quick_package_skips_folder_videos_and_docs(self, mocker):
+        _remove_test_db()
+        await create_all_tables()
+        try:
+            mocker.patch(
+                "lumina_app.onboarding.generate_scene",
+                new_callable=AsyncMock,
+                return_value=(
+                    "from manim import *\n\nclass X(Scene):\n    def construct(self):\n        pass\n"
+                ),
+            )
+            mocker.patch(
+                "lumina_app.onboarding.submit_render",
+                new_callable=AsyncMock,
+                return_value=("https://example.com/v.mp4", "job-123"),
+            )
+            mocker.patch(
+                "lumina_app.onboarding.generate_docs",
+                new_callable=AsyncMock,
+                return_value="# Doc",
+            )
+
+            graph = {
+                "nodes": [
+                    {"source_file": "backend/main.py", "label": "f", "type": "function"},
+                    {"source_file": "backend/models.py", "label": "User", "type": "class"},
+                ],
+                "edges": [],
+                "god_nodes": [],
+                "community_summary": {},
+                "language_summary": {"python": 2},
+            }
+            summaries = {"backend/main.py": "s1", "backend/models.py": "s2"}
+
+            async with AsyncSessionLocal() as session:
+                pkg = OnboardingPackage(codebase_id=uuid.uuid4(), videos=[], docs=[])
+                session.add(pkg)
+                await session.commit()
+                await session.refresh(pkg)
+                package_id = str(pkg.id)
+
+            await generate_package(package_id, graph, summaries, "quick", None, "low")
+
+            async with AsyncSessionLocal() as session:
+                refreshed = await session.get(OnboardingPackage, uuid.UUID(package_id))
+
+            assert len(refreshed.videos) == 1
+            assert refreshed.videos[0]["is_overview"] is True
+            assert len(refreshed.docs) == 1
+            assert refreshed.docs[0]["doc_type"] == "readme"
+        finally:
+            _remove_test_db()
+
+
 class TestPlanOnboardingVideos:
+    """plan_onboarding_videos (community-based planning) is no longer
+    wired into /api/onboard — generate_package uses folder-based planning
+    instead — but the function itself is still intact and tested here."""
+
     async def test_full_returns_between_three_and_five(self, mocker):
         plans_json = "[" + ",".join(
             f'{{"scene_name": "Scene{i}", "title": "T{i}", "description": "d", "relevant_files": []}}'

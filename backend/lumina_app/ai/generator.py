@@ -3,6 +3,102 @@ import anthropic
 from lumina_app.ai.planner import ScenePlan
 from lumina_app.settings import settings
 
+WEB_DIAGRAM_PATTERN = """
+VISUAL PATTERN for architecture web diagram:
+Show the entire system as a connected graph.
+
+Layout (folder-level nodes only, max 8 nodes):
+- Central node in the middle: the main API/backend service
+- Surrounding nodes arranged in a circle around it
+- Each node: RoundedRectangle (width=2.5, height=0.9)
+  with folder/service name as Text inside
+- Node colors by type:
+    API/backend: GREEN_E
+    Frontend/UI: BLUE_E
+    Database/storage: RED_E
+    Workers/jobs: YELLOW_E
+    Infrastructure: GRAY_A
+    SDK/external: PURPLE_E
+
+Animation sequence:
+1. Title "System Architecture" fades in at top (2 sec)
+2. Central node (API) appears with Create() (1 sec)
+3. Surrounding nodes appear one by one with GrowFromCenter() (0.5 sec each)
+4. Edges (Lines/Arrows) draw between connected nodes (0.3 sec each)
+   - Bidirectional: double-headed Arrow
+   - One-way: single Arrow
+   - Each edge has a tiny label (font_size=18, GRAY_A)
+     describing the connection: "HTTP", "SQL", "Redis", "S3", "SDK"
+5. After all nodes and edges: highlight the most connected
+   node with a brief Circumscribe() flash
+6. Hold for 3 seconds showing complete web
+
+IMPORTANT: Position nodes using polar coordinates:
+  center = ORIGIN
+  surrounding nodes at angles: 0, 45, 90, 135, 180, 225, 270, 315 degrees
+  radius from center: 2.8 units
+  Convert: x = radius * cos(angle), y = radius * sin(angle)
+"""
+
+# The 5 Scene subclasses a multi_scene generation must produce. Referenced
+# both in the prompt text below and in generate_scene's validation, so the
+# two can never drift out of sync.
+MULTI_SCENE_REQUIRED_CLASSES = [
+    "TitleScene",
+    "ArchitectureWebScene",
+    "RequestJourneyScene",
+    "FolderOverviewScene",
+    "DocsReferenceScene",
+]
+
+MULTI_SCENE_PATTERN = f"""
+VISUAL PATTERN for multi-scene narrative video:
+This generates a COMPLETE multi-scene Python file with
+multiple Scene classes. All scenes will be rendered and
+combined into one video.
+
+STRUCTURE — generate ALL of these scene classes:
+
+class TitleScene(Scene):
+    # Project name + one-line description
+    # Duration: 8 seconds
+    # Simple: big title, subtitle, fade in/out
+
+class ArchitectureWebScene(Scene):
+    # Folder-level web diagram:
+{WEB_DIAGRAM_PATTERN}
+    # Duration: 20-30 seconds
+    # Show all top-level folders as nodes with connections
+
+class RequestJourneyScene(Scene):
+    # Animate a request traveling through the system
+    # Duration: 20-25 seconds
+    # Show: User -> Frontend -> API -> Auth -> Quota -> Worker -> Storage -> Response
+    # Use moving dot/packet traveling through colored components
+
+class FolderOverviewScene(Scene):
+    # One slide per major folder (2-4 folders)
+    # Duration: 5 seconds per folder
+    # Each: folder name + what it contains (3-5 bullet points)
+    # Transition between folders with Transform or FadeOut/FadeIn
+
+class DocsReferenceScene(Scene):
+    # Final scene pointing to generated docs
+    # Duration: 8 seconds
+    # Show: "For deeper dives:" then list the generated MD files
+    # e.g. "- ARCHITECTURE.md - full system docs"
+    #      "- docs/backend/README.md - backend internals"
+    #      "- docs/worker/README.md - render pipeline"
+
+IMPORTANT RULES for multi-scene files:
+- Each class is a separate Scene that inherits from Scene
+- First line of file: from manim import *
+- Each class has its own construct() method
+- No shared state between classes
+- All classes must be independently renderable
+- Total combined duration: 60-120 seconds
+"""
+
 SCENE_PATTERNS = {
     "overview": """
 VISUAL PATTERN for architecture overview — show a REQUEST JOURNEY, not a static diagram:
@@ -68,6 +164,8 @@ VISUAL PATTERN (general):
 - Use color to distinguish different types of components
 - Keep text labels short (max 20 chars) and legible (font_size >= 24)
 """,
+    "web_diagram": WEB_DIAGRAM_PATTERN,
+    "multi_scene": MULTI_SCENE_PATTERN,
 }
 
 LAYOUT_RULES = """
@@ -95,19 +193,43 @@ ARROW LABEL RULES:
 """
 
 
-def _get_scene_pattern(scene_name: str, description: str) -> str:
-    """Pick the most relevant visual pattern for this scene."""
+def _scene_pattern_key(scene_name: str, description: str) -> str:
+    """Pick which SCENE_PATTERNS entry best fits this scene.
+
+    "multi_scene" is checked first via "full"/"complete" rather than a bare
+    "overview" keyword — plain single-scene overview plans (e.g.
+    "ArchitectureOverview", "CodebaseOverview", produced by the community/
+    god-node planners) already contain "overview" in their name, and this
+    must NOT route them into the multi-scene pattern: that pattern requires
+    5 differently-named classes, none matching plan.scene_name, which would
+    make generate_scene's class-name check fail every single scene of that
+    kind. Only the dedicated multi-scene overview plan ("CompleteArchitecture
+    Overview") is meant to land here, and it contains "complete".
+    """
     name_lower = scene_name.lower()
     desc_lower = description.lower()
+    if (
+        "full" in name_lower
+        or "complete" in name_lower
+        or "entire" in desc_lower
+        or "all folders" in desc_lower
+        or "complete architecture" in desc_lower
+    ):
+        return "multi_scene"
     if any(w in name_lower + desc_lower for w in ["overview", "architecture", "structure"]):
-        return SCENE_PATTERNS["overview"]
+        return "overview"
     if any(w in name_lower + desc_lower for w in ["flow", "request", "pipeline", "sequence"]):
-        return SCENE_PATTERNS["flow"]
+        return "flow"
     if any(w in name_lower + desc_lower for w in ["model", "schema", "class", "inherit", "entity"]):
-        return SCENE_PATTERNS["models"]
+        return "models"
     if any(w in name_lower + desc_lower for w in ["component", "module", "community", "cluster"]):
-        return SCENE_PATTERNS["components"]
-    return SCENE_PATTERNS["default"]
+        return "components"
+    return "default"
+
+
+def _get_scene_pattern(scene_name: str, description: str) -> str:
+    """Pick the most relevant visual pattern for this scene."""
+    return SCENE_PATTERNS[_scene_pattern_key(scene_name, description)]
 
 
 def _extract_text(message) -> str:
@@ -192,18 +314,35 @@ Key routes: {', '.join(key_routes) or 'none'}
 Key relationships:
 {edge_str or '  (none found)'}"""
 
+    pattern_key = _scene_pattern_key(plan.scene_name, plan.description)
+    pattern = SCENE_PATTERNS[pattern_key]
+    is_multi_scene = pattern_key == "multi_scene"
+
+    if is_multi_scene:
+        opening = "Generate a COMPLETE multi-scene Python file with multiple Scene classes."
+        class_rules = (
+            f"- Generate ALL of these scene classes (see VISUAL PATTERN below for what "
+            f"each should contain): {', '.join(MULTI_SCENE_REQUIRED_CLASSES)}\n"
+            f"- Each is its own `class X(Scene):` with its own construct() method\n"
+            f"- No shared state between classes"
+        )
+        duration_rule = "- Total animation duration: 60-120 seconds combined across all scenes"
+    else:
+        opening = "Generate ONE Manim scene class that visually explains the described concept."
+        class_rules = f"- Class name must be exactly: {plan.scene_name}\n- class {plan.scene_name}(Scene):"
+        duration_rule = "- Total animation duration: 15-25 seconds"
+
     system = f"""You are a Manim CE expert creating educational animations.
-Generate ONE Manim scene class that visually explains the described concept.
+{opening}
 
 STRICT RULES:
 - Output ONLY valid Python code. Zero markdown. Zero backticks.
-- Class name must be exactly: {plan.scene_name}
-- class {plan.scene_name}(Scene):
+{class_rules}
 - First line: from manim import *
 - NEVER use MathTex or Tex — ONLY Text()
 - NEVER use font_size below 20 (too small to read)
 - Keep all text under 25 characters per label
-- Total animation duration: 15-25 seconds
+{duration_rule}
 - End with self.wait(1)
 {LAYOUT_RULES}
 {ARROW_LABEL_RULES}
@@ -222,7 +361,7 @@ COLOR PALETTE (use these for visual clarity):
   BLUE_A, GREEN_A, YELLOW_A, RED_A, GRAY_A      # light/accent
 
 VISUAL PATTERN TO FOLLOW:
-{_get_scene_pattern(plan.scene_name, plan.description)}
+{pattern}
 
 QUALITY CHECKLIST (your output MUST satisfy all):
 [ ] At least 4 distinct named Manim objects (not just Text everywhere)
@@ -241,12 +380,16 @@ QUALITY CHECKLIST (your output MUST satisfy all):
             client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
             message = await client.messages.create(
                 model=settings.anthropic_model_smart,
-                max_tokens=2000,
+                max_tokens=10000,
                 system=system,
                 messages=[{"role": "user", "content": user_message}],
             )
             code = _strip_fences(_extract_text(message))
-            if f"class {plan.scene_name}(Scene):" not in code:
+            if is_multi_scene:
+                if not all(f"class {c}(Scene):" in code for c in MULTI_SCENE_REQUIRED_CLASSES):
+                    # Missing one or more required scenes — retry once
+                    continue
+            elif f"class {plan.scene_name}(Scene):" not in code:
                 # Scene name not found — retry once
                 continue
             try:

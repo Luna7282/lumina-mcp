@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumina_app.ai.documenter import DOC_TYPES, generate_docs
 from lumina_app.ai.generator import generate_scene
-from lumina_app.ai.planner import plan_onboarding_videos, plan_visualization
+from lumina_app.ai.planner import plan_visualization
 from lumina_app.ai.summarizer import summarize_codebase
 from lumina_app.database import create_all_tables, get_db
 from lumina_app.extract.cache import codebase_hash, compute_hashes
@@ -16,7 +16,7 @@ from lumina_app.extract.cluster import detect_communities, get_community_summary
 from lumina_app.extract.dispatch import extract_all
 from lumina_app.extract.graph import build_graph, get_god_nodes, get_language_summary
 from lumina_app.models import Codebase, CodebaseFile, CodebaseVideo, OnboardingPackage
-from lumina_app.onboarding import PACKAGE_DOC_TYPES, generate_package
+from lumina_app.onboarding import generate_package
 from lumina_app.schemas import AnalyzeRequest, AnalyzeResponse, CodebaseRead
 from lumina_app.settings import settings
 
@@ -354,8 +354,13 @@ async def create_onboarding_package(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate a full onboarding package: one focused video per
-    architectural community plus all applicable doc types, in parallel."""
+    """Kick off a full onboarding package: a multi-scene overview video
+    covering the whole codebase, one deep-dive video per top-level folder,
+    and the package_type's docs — all planned and generated in the
+    background. Folder/video planning depends on the same graph/summaries
+    the background task already needs, so it happens there rather than
+    here, keeping this endpoint fast; the package starts with empty
+    videos/docs lists that fill in once planning completes."""
     codebase = await db.get(Codebase, uuid.UUID(request.codebase_id))
     if not codebase:
         raise HTTPException(404, "Codebase not found")
@@ -366,28 +371,12 @@ async def create_onboarding_package(
     summaries = await summarize_codebase(codebase.graph, db_files, db)
     await db.commit()
 
-    # Plan videos based on communities, and pick doc types for this package
-    video_plans = await plan_onboarding_videos(codebase.graph, summaries, request.package_type)
-    doc_types = PACKAGE_DOC_TYPES[request.package_type]
-
-    videos_meta = [
-        {
-            "focus": plan.title,
-            "scene_name": plan.scene_name,
-            "video_id": None,
-            "video_url": None,
-            "status": "pending",
-        }
-        for plan in video_plans
-    ]
-    docs_meta = [{"doc_type": dt, "filename": None, "content": None, "status": "pending"} for dt in doc_types]
-
     package = OnboardingPackage(
         codebase_id=codebase.id,
         package_type=request.package_type,
         status="generating",
-        videos=videos_meta,
-        docs=docs_meta,
+        videos=[],
+        docs=[],
         custom_instructions=request.custom_instructions,
     )
     db.add(package)
@@ -396,7 +385,7 @@ async def create_onboarding_package(
 
     package_id = str(package.id)
 
-    # Generate every video and doc in parallel in the background — see
+    # Plan and generate everything in the background — see
     # render_and_save's docstring for why this can't reuse the
     # request-scoped `db` session.
     background_tasks.add_task(
@@ -404,8 +393,7 @@ async def create_onboarding_package(
         package_id,
         codebase.graph,
         summaries,
-        video_plans,
-        doc_types,
+        request.package_type,
         request.custom_instructions,
         request.quality,
     )
@@ -414,8 +402,8 @@ async def create_onboarding_package(
         package_id=package_id,
         status="generating",
         codebase_id=request.codebase_id,
-        videos=videos_meta,
-        docs=docs_meta,
+        videos=[],
+        docs=[],
     )
 
 
@@ -435,6 +423,7 @@ async def get_package(package_id: str, db: AsyncSession = Depends(get_db)):
                 "doc_type": d["doc_type"],
                 "filename": d["filename"],
                 "status": d["status"],
+                "folder": d.get("folder"),
                 # Only include content once done — could be large.
                 "content": d.get("content") if d["status"] == "done" else None,
                 "word_count": len(d["content"].split()) if d.get("content") else 0,

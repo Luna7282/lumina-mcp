@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import httpx
@@ -303,6 +304,175 @@ class TestCreateOnboardingPackage:
         onboard_call = client.post.call_args_list[1]
         assert onboard_call.kwargs["json"]["package_type"] == "technical"
         assert onboard_call.kwargs["json"]["custom_instructions"] == "Emphasize the render pipeline."
+
+    def test_saves_to_disk_when_wait_and_save_to_disk_true(self, mocker, tmp_path):
+        (tmp_path / "main.py").write_text("print('hi')")
+        _mock_client(mocker, post_side_effect=[_response(ANALYZE_RESULT), _response(ONBOARD_RESULT)])
+        done_result = {"status": "done", "videos": [], "docs": []}
+        mocker.patch("server._poll_package", return_value=done_result)
+        mock_save = mocker.patch(
+            "server._save_package_to_disk", return_value=str(tmp_path / "project-docs")
+        )
+
+        result = server.create_onboarding_package(str(tmp_path), wait=True, save_to_disk=True)
+
+        mock_save.assert_called_once()
+        assert mock_save.call_args.args[0] is done_result
+        assert result["saved_to"] == str(tmp_path / "project-docs")
+        assert "message" in result
+
+    def test_skips_save_to_disk_when_false(self, mocker, tmp_path):
+        (tmp_path / "main.py").write_text("print('hi')")
+        _mock_client(mocker, post_side_effect=[_response(ANALYZE_RESULT), _response(ONBOARD_RESULT)])
+        mocker.patch("server._poll_package", return_value={"status": "done", "videos": [], "docs": []})
+        mock_save = mocker.patch("server._save_package_to_disk")
+
+        result = server.create_onboarding_package(str(tmp_path), wait=True, save_to_disk=False)
+
+        mock_save.assert_not_called()
+        assert "saved_to" not in result
+
+    def test_skips_save_to_disk_when_not_done(self, mocker, tmp_path):
+        (tmp_path / "main.py").write_text("print('hi')")
+        _mock_client(mocker, post_side_effect=[_response(ANALYZE_RESULT), _response(ONBOARD_RESULT)])
+        mocker.patch("server._poll_package", return_value={"status": "timeout"})
+        mock_save = mocker.patch("server._save_package_to_disk")
+
+        result = server.create_onboarding_package(str(tmp_path), wait=True, save_to_disk=True)
+
+        mock_save.assert_not_called()
+        assert result["status"] == "timeout"
+
+
+class TestSavePackageToDisk:
+    def test_creates_project_docs_structure(self, mocker, tmp_path):
+        mock_download = mocker.patch("server._download_file")
+        package_data = {
+            "videos": [
+                {"status": "done", "video_url": "https://x/v.mp4", "folder": None},
+                {"status": "done", "video_url": "https://x/backend.mp4", "folder": "backend"},
+                {"status": "pending", "video_url": None, "folder": "worker"},
+            ],
+            "docs": [
+                {"status": "done", "content": "# Arch", "filename": "ARCHITECTURE.md"},
+                {"status": "done", "content": "# Backend", "filename": "docs/backend/README.md"},
+                {"status": "pending", "content": None, "filename": None},
+            ],
+        }
+
+        output_dir = server._save_package_to_disk(package_data, str(tmp_path))
+
+        output_path = Path(output_dir)
+        assert output_path == tmp_path / "project-docs"
+        assert (output_path / "videos").is_dir()
+        assert (output_path / "docs").is_dir()
+        assert (output_path / "ARCHITECTURE.md").read_text() == "# Arch"
+        assert (output_path / "docs" / "backend" / "README.md").read_text() == "# Backend"
+        assert (output_path / "index.md").exists()
+        assert mock_download.call_count == 2  # only the two "done" videos with a url
+
+        assert package_data["videos"][0]["saved_to"].endswith("00_complete_architecture.mp4")
+        assert package_data["videos"][1]["saved_to"].endswith("backend_overview.mp4")
+        assert "saved_to" not in package_data["videos"][2]
+        assert package_data["docs"][0]["saved_to"]
+        assert package_data["docs"][1]["saved_to"]
+        assert "saved_to" not in package_data["docs"][2]
+
+    def test_records_download_error_without_crashing(self, mocker, tmp_path):
+        mocker.patch("server._download_file", side_effect=OSError("network down"))
+        package_data = {
+            "videos": [{"status": "done", "video_url": "https://x/v.mp4", "folder": None}],
+            "docs": [],
+        }
+
+        server._save_package_to_disk(package_data, str(tmp_path))
+
+        assert "network down" in package_data["videos"][0]["download_error"]
+
+
+class TestDownloadFile:
+    def test_sends_non_default_user_agent(self, mocker, tmp_path):
+        # manimstudio.me's WAF returns 403 for Python's default urllib
+        # User-Agent ("Python-urllib/x.y") — a normal-looking one must be
+        # sent, or downloads silently fail in production.
+        mock_response = MagicMock()
+        mock_response.read.return_value = b"video bytes"
+        mock_response.__enter__.return_value = mock_response
+        mock_response.__exit__.return_value = False
+        mock_urlopen = mocker.patch("server.urllib.request.urlopen", return_value=mock_response)
+
+        dest = tmp_path / "out.mp4"
+        server._download_file("https://x/v.mp4", str(dest))
+
+        request = mock_urlopen.call_args.args[0]
+        assert "User-agent" in request.headers
+        assert not request.get_header("User-agent").startswith("Python-urllib")
+        assert dest.read_bytes() == b"video bytes"
+
+
+EXPLAIN_FOLDER_ONBOARD_RESULT = {"package_id": "pkg-2", "status": "generating"}
+EXPLAIN_FOLDER_PACKAGE_DONE = {
+    "status": "done",
+    "videos": [{"status": "done", "video_url": "https://x/folder.mp4"}],
+    "docs": [{"status": "done", "content": "# Backend README"}],
+}
+
+
+class TestExplainFolder:
+    def test_calls_analyze_then_onboard_when_no_codebase_id(self, mocker, tmp_path):
+        (tmp_path / "main.py").write_text("print('hi')")
+        client = _mock_client(
+            mocker,
+            post_side_effect=[_response(ANALYZE_RESULT), _response(EXPLAIN_FOLDER_ONBOARD_RESULT)],
+        )
+        mocker.patch("server._poll_package", return_value=EXPLAIN_FOLDER_PACKAGE_DONE)
+
+        result = server.explain_folder("backend", project_path=str(tmp_path), save_to_disk=False)
+
+        assert client.post.call_count == 2
+        first_call, second_call = client.post.call_args_list
+        assert first_call.args[0] == "/api/analyze"
+        assert second_call.args[0] == "/api/onboard"
+        assert second_call.kwargs["json"]["package_type"] == "quick"
+        assert "backend/" in second_call.kwargs["json"]["custom_instructions"]
+        assert result["video_url"] == "https://x/folder.mp4"
+        assert result["readme_content"] == "# Backend README"
+
+    def test_skips_analyze_when_codebase_id_given(self, mocker, tmp_path):
+        client = _mock_client(mocker, post_side_effect=[_response(EXPLAIN_FOLDER_ONBOARD_RESULT)])
+        mocker.patch("server._poll_package", return_value=EXPLAIN_FOLDER_PACKAGE_DONE)
+
+        result = server.explain_folder(
+            "backend", codebase_id="cb-1", project_path=str(tmp_path), save_to_disk=False
+        )
+
+        client.post.assert_called_once()
+        assert client.post.call_args.args[0] == "/api/onboard"
+        assert result["codebase_id"] == "cb-1"
+
+    def test_saves_video_and_readme_to_disk(self, mocker, tmp_path):
+        mock_download = mocker.patch("server._download_file")
+        _mock_client(mocker, post_side_effect=[_response(EXPLAIN_FOLDER_ONBOARD_RESULT)])
+        mocker.patch("server._poll_package", return_value=EXPLAIN_FOLDER_PACKAGE_DONE)
+
+        result = server.explain_folder(
+            "backend", codebase_id="cb-1", project_path=str(tmp_path), save_to_disk=True
+        )
+
+        mock_download.assert_called_once()
+        assert result["video_saved_to"].endswith("backend_detail.mp4")
+        readme_path = Path(tmp_path) / "project-docs" / "docs" / "backend" / "README.md"
+        assert readme_path.read_text(encoding="utf-8") == "# Backend README"
+        assert result["readme_saved_to"] == str(readme_path)
+
+    def test_returns_status_when_package_not_done(self, mocker, tmp_path):
+        _mock_client(mocker, post_side_effect=[_response(EXPLAIN_FOLDER_ONBOARD_RESULT)])
+        mocker.patch("server._poll_package", return_value={"status": "timeout", "message": "still going"})
+
+        result = server.explain_folder("backend", codebase_id="cb-1", project_path=str(tmp_path))
+
+        assert result["status"] == "timeout"
+        assert result["video_url"] is None
 
 
 class TestGetPackageStatus:

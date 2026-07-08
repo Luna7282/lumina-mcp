@@ -1,5 +1,6 @@
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 
 import anthropic
@@ -364,3 +365,67 @@ Each element: {{
             )
         ]
         return _pad_with_default_plans(fallback, graph, summaries, min_videos)
+
+
+def detect_folders(graph: dict) -> list[str]:
+    """Detect top-level folders from the graph nodes, most files first.
+
+    Skips single-file "folders" — a folder needs 2+ files to be worth its
+    own deep-dive video; root-level files (no folder at all) never count.
+    """
+    folder_counts: Counter[str] = Counter()
+    for node in graph.get("nodes", []):
+        path = node.get("source_file", "")
+        parts = path.replace("\\", "/").split("/")
+        if len(parts) > 1:
+            folder_counts[parts[0]] += 1
+    return [folder for folder, count in folder_counts.most_common() if count >= 2]
+
+
+def _folder_matches(path: str, folder: str) -> bool:
+    norm = path.replace("\\", "/")
+    return norm == folder or norm.startswith(folder + "/")
+
+
+async def plan_folder_videos(
+    graph: dict,
+    summaries: dict[str, str],
+    folders: list[str],
+) -> list[ScenePlan]:
+    """Plan one focused video per top-level folder — a deterministic
+    deep-dive into each folder's internals. Folder boundaries are
+    unambiguous, so unlike plan_visualization/plan_onboarding_videos this
+    needs no AI call.
+    """
+    folder_plans = []
+    used_names: set[str] = set()
+
+    for idx, folder in enumerate(folders[:5]):  # max 5 folder videos
+        folder_nodes = [n for n in graph.get("nodes", []) if _folder_matches(n.get("source_file", ""), folder)]
+        folder_files = list({n["source_file"] for n in folder_nodes})[:8]
+
+        classes = [n["label"] for n in folder_nodes if n["type"] == "class"][:5]
+        routes = [n["label"] for n in folder_nodes if n["type"] == "route"][:5]
+
+        scene_name = _unique_name(
+            _sanitize_scene_name(folder.title(), f"Folder{idx}") + "FolderOverview", used_names
+        )
+        used_names.add(scene_name)
+
+        folder_plans.append(
+            ScenePlan(
+                scene_name=scene_name,
+                title=f"{folder.title()} — Internal Architecture"[:40],
+                description=(
+                    f"Deep dive into the {folder}/ folder. "
+                    f"Show file relationships, key classes "
+                    f"({', '.join(classes[:3])}), "
+                    f"{'routes: ' + ', '.join(routes[:3]) + ', ' if routes else ''}"
+                    f"and how {folder} connects to the rest of the system. "
+                    f"End with: 'See docs/{folder}/README.md for more.'"
+                ),
+                relevant_files=folder_files or list(summaries.keys())[:5],
+            )
+        )
+
+    return folder_plans
