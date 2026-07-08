@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import dataclass, field
 
 import anthropic
@@ -139,8 +140,111 @@ Each element: {
         ]
 
 
-# Max number of onboarding videos per package_type.
-PACKAGE_VIDEO_LIMITS = {"full": 5, "quick": 1, "technical": 3}
+# (min, max) number of onboarding videos per package_type.
+PACKAGE_VIDEO_LIMITS = {"full": (3, 5), "quick": (1, 1), "technical": (2, 3)}
+
+
+def _sanitize_scene_name(label: str, fallback: str) -> str:
+    """Turn an arbitrary label into a valid Python class name."""
+    name = re.sub(r"[^0-9a-zA-Z]", "", label) or fallback
+    if not name or name[0].isdigit():
+        name = f"Scene{name}"
+    return name
+
+
+def _unique_name(candidate: str, used_names: set[str]) -> str:
+    name = candidate
+    n = 2
+    while name in used_names:
+        name = f"{candidate}{n}"
+        n += 1
+    return name
+
+
+def _pad_with_default_plans(
+    plans: list[ScenePlan],
+    graph: dict,
+    summaries: dict[str, str],
+    min_videos: int,
+) -> list[ScenePlan]:
+    """Top up `plans` with community/god-node-derived scene plans until it
+    reaches min_videos.
+
+    The AI is asked to plan enough videos, but a small codebase, a thin
+    community structure, or a degenerate response can leave it short —
+    this guarantees the package still meets its minimum by falling back to
+    the same god_nodes/community_summary data the AI itself was given.
+    """
+    if len(plans) >= min_videos:
+        return plans
+
+    used_names = {p.scene_name for p in plans}
+    used_communities = {p.community_id for p in plans if p.community_id is not None}
+
+    community_summary = graph.get("community_summary", {})
+    god_nodes = graph.get("god_nodes", [])
+
+    # Prefer padding from distinct communities not already covered.
+    for cid, info in community_summary.items():
+        if len(plans) >= min_videos:
+            break
+        if cid in used_communities:
+            continue
+        top_nodes = info.get("top_nodes", [])
+        label = top_nodes[0] if top_nodes else f"Community{cid}"
+        scene_name = _unique_name(_sanitize_scene_name(label, f"Community{cid}"), used_names)
+        used_names.add(scene_name)
+        used_communities.add(cid)
+        files = info.get("files", [])[:6] or list(summaries.keys())[:5]
+        plans.append(
+            ScenePlan(
+                scene_name=scene_name,
+                title=f"{label} Overview"[:40],
+                description=f"Overview of the {label} subsystem: {', '.join(top_nodes[:3])}",
+                relevant_files=files,
+                community_id=cid,
+            )
+        )
+
+    # Still short? Draw on god nodes not yet used as a scene basis.
+    for node in god_nodes:
+        if len(plans) >= min_videos:
+            break
+        label = node["label"]
+        scene_name = _sanitize_scene_name(label, "KeyComponent")
+        if scene_name in used_names:
+            continue
+        used_names.add(scene_name)
+        source_file = node.get("source_file")
+        plans.append(
+            ScenePlan(
+                scene_name=scene_name,
+                title=f"{label} Deep Dive"[:40],
+                description=(
+                    f"Focused look at {label}, a key {node.get('type', 'component')} "
+                    f"in {source_file or 'the codebase'}."
+                ),
+                relevant_files=[source_file] if source_file else list(summaries.keys())[:3],
+                community_id=None,
+            )
+        )
+
+    # Still short (tiny codebase, no communities/god nodes left to draw
+    # on) — pad with additional overview videos as a last resort.
+    while len(plans) < min_videos:
+        scene_name = _unique_name("ArchitectureOverview", used_names)
+        used_names.add(scene_name)
+        plans.append(
+            ScenePlan(
+                scene_name=scene_name,
+                title="Architecture Overview",
+                description="High-level overview of the codebase's main components.",
+                relevant_files=list(summaries.keys())[:5],
+                community_id=None,
+            )
+        )
+
+    return plans
 
 
 async def plan_onboarding_videos(
@@ -154,7 +258,7 @@ async def plan_onboarding_videos(
     combined video), this plans multiple *separate* videos — one per
     subsystem — so each can be rendered and reviewed independently.
     """
-    max_videos = PACKAGE_VIDEO_LIMITS.get(package_type, 5)
+    min_videos, max_videos = PACKAGE_VIDEO_LIMITS.get(package_type, (3, 5))
 
     god_nodes = graph.get("god_nodes", [])[:8]
     community_summary = graph.get("community_summary", {})
@@ -186,8 +290,8 @@ Code communities (Leiden clusters):
 File summaries:
 {summaries_str}
 
-Return a JSON array of AT MOST {max_videos} video plans — one per major
-architectural community/layer. Each element:
+Return a JSON array of BETWEEN {min_videos} AND {max_videos} video plans —
+one per major architectural community/layer. Each element:
 {{
   "scene_name": "ValidPythonClassName",
   "title": "Human Readable Title",
@@ -208,13 +312,15 @@ number:
   Bad:  "Community0", "Overview", "Scene1", "Part2"
 
 RULES:
-- Return AT MOST {max_videos} video plans.
-- Merge or drop small/trivial communities rather than padding to the max —
-  fewer, higher-signal videos beat many thin ones.
-- Each video must focus on ONE specific subsystem.
+- Return AT LEAST {min_videos} and AT MOST {max_videos} video plans.
+- Each video must focus on ONE specific subsystem — never repeat the same
+  subsystem twice.
 - relevant_files: ONLY the files directly involved in that subsystem,
   3-6 files max (not all files in the community).
-- If there is only one video (max_videos == 1), make it a single
+- If there aren't {min_videos} naturally distinct communities, add focused
+  deep-dive videos on the most important god nodes/files to reach the
+  minimum — do not fall short of {min_videos}.
+- If min_videos == max_videos == 1, make the single video an
   architecture-overview video covering the whole codebase.
 
 Return ONLY a valid JSON array. No markdown. No explanation.
@@ -239,13 +345,14 @@ Each element: {{
         raw = _extract_text(message).strip()
         raw = raw.replace("```json", "").replace("```", "").strip()
         plans_data = json.loads(raw)
-        return [ScenePlan(**p) for p in plans_data][:max_videos]
+        plans = [ScenePlan(**p) for p in plans_data][:max_videos]
+        return _pad_with_default_plans(plans, graph, summaries, min_videos)
 
     except Exception:
-        # Fallback: one overview video
+        # Fallback: one overview video, padded up to min_videos if needed.
         all_files = list(summaries.keys())[:5]
         top_labels = [n["label"] for n in god_nodes[:3]]
-        return [
+        fallback = [
             ScenePlan(
                 scene_name="ArchitectureOverview",
                 title="Architecture Overview",
@@ -256,3 +363,4 @@ Each element: {{
                 community_id=None,
             )
         ]
+        return _pad_with_default_plans(fallback, graph, summaries, min_videos)

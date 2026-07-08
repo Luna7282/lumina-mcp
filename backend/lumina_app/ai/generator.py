@@ -5,24 +5,41 @@ from lumina_app.settings import settings
 
 SCENE_PATTERNS = {
     "overview": """
-VISUAL PATTERN for architecture overview:
-- Start: project title Text fades in center, then moves to top
-- Middle: show 2-4 horizontal layers as colored Rectangles stacked vertically:
-    Layer colors: BLUE_E (frontend/UI), GREEN_E (API/routes),
-                  YELLOW_E (services/logic), RED_E (database/models)
-  Each layer: Rectangle with Text label inside, animate Create() bottom-up
-  Between layers: Arrow pointing down, animate with GrowArrow()
-- Highlight: the most-connected god node pulses with a surrounding Circle
-- End: all elements stay visible, self.wait(1)
+VISUAL PATTERN for architecture overview — show a REQUEST JOURNEY, not a static diagram:
+1. Title fades in at top (about 2 seconds), staying in the title zone (see LAYOUT RULES)
+2. Show components one at a time, top to bottom, each with Create():
+   - Each component: RoundedRectangle + Text label inside
+   - Color by type: BLUE_E=frontend, GREEN_E=API/routes, YELLOW_E=services, RED_E=database/storage
+   - Spacing: exactly 1.2 units between centers (use the exact y positions in LAYOUT RULES)
+   - Maximum 4 components
+3. After all components are shown, animate a REQUEST PACKET traveling through them:
+   - A small glowing Dot starts above the top component
+   - Move it DOWN through each component in turn (MoveAlongPath or sequential
+     .animate moves), pausing briefly at each one
+   - At each component: briefly Indicate() it or flash a surrounding glow
+   - A small label appears next to the dot at each step, e.g.:
+     "Request" -> "Auth Check" -> "Quota Check" -> "Render" -> "Response"
+     (choose labels that match what this codebase's components actually do)
+4. Final state: all components remain visible, the dot resting at the bottom —
+   the complete journey stays on screen, self.wait(1)
+This tells a STORY: a request enters and travels through the system.
+Do not just place static boxes and stop — the journey IS the animation.
 """,
     "flow": """
-VISUAL PATTERN for data/request flow:
-- Show 4-6 components as labeled rectangles arranged left-to-right
-- Animate a moving dot (small Circle) traveling along arrows between them
-  Use MoveAlongPath or sequential moves with rate_func=smooth
-- Each arrow has a small label (calls/handles/imports) above it
-- Use color coding: entry points in BLUE, processing in GREEN, storage in RED
-- End with all arrows visible showing the complete flow path
+VISUAL PATTERN for data/request flow — a sequence-diagram style animation:
+1. Title at top (title zone from LAYOUT RULES)
+2. Show 3-5 actors as vertical columns (not horizontal boxes):
+   - Each actor: a labeled rectangle at the top of a vertical DashedLine
+   - Arrange left to right across the screen
+   - Actor width: 2.5 units, spacing: 2.8 units apart
+   - First actor at x=-5, last at x=5 (for 4 actors)
+3. Animate messages as horizontal arrows between actors' lifelines:
+   - Each arrow appears one at a time (Create or GrowArrow)
+   - A small label describing the message sits ON the arrow (see ARROW LABELS)
+   - Arrows animate left-to-right or right-to-left depending on message direction
+   - Use different colors: BLUE for requests, GREEN for responses, RED for errors
+4. Show AT LEAST 4 message arrows so the interaction reads as a complete
+   round trip, not a single call
 """,
     "models": """
 VISUAL PATTERN for data models / class hierarchy:
@@ -52,6 +69,30 @@ VISUAL PATTERN (general):
 - Keep text labels short (max 20 chars) and legible (font_size >= 24)
 """,
 }
+
+LAYOUT_RULES = """
+LAYOUT RULES (strictly follow these):
+- Manim frame is 14.2 units wide × 8 units tall
+- Reserve top 1.5 units for title (y=3.5 to y=4.5)
+- Content area: y from -3.0 to 3.0 (6 units tall)
+- Maximum 4 layers/boxes in one scene
+- Each box height: 0.8 units, spacing: 1.2 units between centers
+- First box center: y=2.0, second: y=0.8, third: y=-0.4, fourth: y=-1.6
+- Box width: 8 units max
+- All text font_size between 24 and 32
+- Never place anything below y=-3.5 or above y=4.0
+- If more than 4 items: show only the 4 most important ones
+"""
+
+ARROW_LABEL_RULES = """
+ARROW LABEL RULES:
+- For labels on arrows between components, place them INSIDE the arrow's
+  path, not floating beside it
+- Use font_size=20, color=GRAY_A
+- Position at the arrow's midpoint, offset up by 0.15 units
+  (e.g. label.move_to(arrow.get_center() + UP * 0.15))
+- Keep label text under 15 characters
+"""
 
 
 def _get_scene_pattern(scene_name: str, description: str) -> str:
@@ -164,7 +205,8 @@ STRICT RULES:
 - Keep all text under 25 characters per label
 - Total animation duration: 15-25 seconds
 - End with self.wait(1)
-
+{LAYOUT_RULES}
+{ARROW_LABEL_RULES}
 AVAILABLE MANIM OBJECTS (use these, nothing else):
   Text, VGroup, Arrow, CurvedArrow, Rectangle, RoundedRectangle,
   Circle, Dot, Line, DashedLine, Polygon, Triangle

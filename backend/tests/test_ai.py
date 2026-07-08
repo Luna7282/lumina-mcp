@@ -268,6 +268,17 @@ class TestGenerateScene:
         call_kwargs = mock_client.messages.create.call_args.kwargs
         assert "User's custom requirements:" not in call_kwargs["system"]
 
+    async def test_layout_rules_appear_in_system_prompt(self, mocker):
+        code_text = "from manim import *\n\nclass MyScene(Scene):\n    def construct(self):\n        self.wait(1)\n"
+        mock_client = _mock_anthropic_client(mocker, code_text)
+        plan = ScenePlan(scene_name="MyScene", title="My Scene", description="d", relevant_files=[])
+        await generate_scene(plan, {}, {"nodes": [], "edges": []})
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        system_prompt = call_kwargs["system"]
+        assert "LAYOUT RULES" in system_prompt
+        assert "Maximum 4 layers/boxes in one scene" in system_prompt
+        assert "ARROW LABEL RULES" in system_prompt
+
 
 class TestExplainEndpoint:
     def test_explain_with_valid_codebase_returns_rendering(self, client, mocker):

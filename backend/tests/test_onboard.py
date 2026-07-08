@@ -155,7 +155,7 @@ class TestGetPackageEndpoint:
 
 
 class TestPlanOnboardingVideos:
-    async def test_full_caps_at_five(self, mocker):
+    async def test_full_returns_between_three_and_five(self, mocker):
         plans_json = "[" + ",".join(
             f'{{"scene_name": "Scene{i}", "title": "T{i}", "description": "d", "relevant_files": []}}'
             for i in range(8)
@@ -164,18 +164,18 @@ class TestPlanOnboardingVideos:
         plans = await plan_onboarding_videos(
             {"god_nodes": [], "community_summary": {}, "language_summary": {}}, {}, package_type="full"
         )
-        assert len(plans) <= 5
+        assert 3 <= len(plans) <= 5
 
-    async def test_quick_caps_at_one(self, mocker):
+    async def test_quick_is_exactly_one(self, mocker):
         plans_json = '[{"scene_name": "A", "title": "A", "description": "d", "relevant_files": []},' \
             '{"scene_name": "B", "title": "B", "description": "d", "relevant_files": []}]'
         _mock_anthropic_client(mocker, plans_json)
         plans = await plan_onboarding_videos(
             {"god_nodes": [], "community_summary": {}, "language_summary": {}}, {}, package_type="quick"
         )
-        assert len(plans) <= 1
+        assert len(plans) == 1
 
-    async def test_technical_caps_at_three(self, mocker):
+    async def test_technical_returns_between_two_and_three(self, mocker):
         plans_json = "[" + ",".join(
             f'{{"scene_name": "Scene{i}", "title": "T{i}", "description": "d", "relevant_files": []}}'
             for i in range(5)
@@ -184,9 +184,29 @@ class TestPlanOnboardingVideos:
         plans = await plan_onboarding_videos(
             {"god_nodes": [], "community_summary": {}, "language_summary": {}}, {}, package_type="technical"
         )
-        assert len(plans) <= 3
+        assert 2 <= len(plans) <= 3
 
-    async def test_fallback_on_json_error_returns_one_overview(self, mocker):
+    async def test_full_pads_up_to_minimum_when_ai_returns_fewer(self, mocker):
+        # AI returns only 1 plan, but "full" requires at least 3 — the
+        # remaining slots should be padded from community_summary/god_nodes.
+        plans_json = '[{"scene_name": "AuthFlow", "title": "Auth", "description": "d", "relevant_files": []}]'
+        _mock_anthropic_client(mocker, plans_json)
+        graph = {
+            "god_nodes": [{"label": "UserService", "type": "class", "degree": 3, "source_file": "main.py"}],
+            "community_summary": {
+                0: {"size": 3, "top_nodes": ["Renderer"], "files": ["render.py"]},
+                1: {"size": 2, "top_nodes": ["Database"], "files": ["db.py"]},
+            },
+            "language_summary": {},
+        }
+        plans = await plan_onboarding_videos(graph, {"main.py": "summary"}, package_type="full")
+
+        assert len(plans) >= 3
+        assert plans[0].scene_name == "AuthFlow"
+        scene_names = [p.scene_name for p in plans]
+        assert len(scene_names) == len(set(scene_names))  # no duplicate names
+
+    async def test_fallback_on_json_error_pads_to_minimum(self, mocker):
         _mock_anthropic_client(mocker, "not valid json at all")
         graph = {
             "god_nodes": [{"label": "UserService", "type": "class", "degree": 3, "source_file": "main.py"}],
@@ -194,8 +214,10 @@ class TestPlanOnboardingVideos:
             "language_summary": {},
         }
         plans = await plan_onboarding_videos(graph, {"main.py": "summary"}, package_type="full")
-        assert len(plans) == 1
+        assert len(plans) >= 3
         assert plans[0].scene_name == "ArchitectureOverview"
+        scene_names = [p.scene_name for p in plans]
+        assert len(scene_names) == len(set(scene_names))  # no duplicate names
 
 
 class TestUpdatePackageItemConcurrency:
