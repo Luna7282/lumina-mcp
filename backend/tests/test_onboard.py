@@ -1,11 +1,16 @@
+import asyncio
 import os
+import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
 from lumina_app.ai.planner import ScenePlan, plan_onboarding_videos
+from lumina_app.database import AsyncSessionLocal, create_all_tables
 from lumina_app.main import app
+from lumina_app.models import OnboardingPackage
+from lumina_app.onboarding import _update_package_item
 
 TEST_DB_FILE = "./test.db"
 
@@ -191,3 +196,44 @@ class TestPlanOnboardingVideos:
         plans = await plan_onboarding_videos(graph, {"main.py": "summary"}, package_type="full")
         assert len(plans) == 1
         assert plans[0].scene_name == "ArchitectureOverview"
+
+
+class TestUpdatePackageItemConcurrency:
+    """Regression test for the lost-update race: generate_package fires
+    several _render_one_video / _generate_one_doc tasks concurrently, each
+    updating one index of the same package's videos/docs JSON list in its
+    own DB session. Without locking, each task reads the whole list before
+    any of them commit, then writes its own stale copy back — the last
+    commit to land wins and silently erases every other task's update."""
+
+    async def test_concurrent_updates_do_not_clobber_each_other(self):
+        _remove_test_db()
+        await create_all_tables()
+        try:
+            async with AsyncSessionLocal() as session:
+                pkg = OnboardingPackage(
+                    codebase_id=uuid.uuid4(),
+                    videos=[{"status": "pending"} for _ in range(5)],
+                    docs=[],
+                )
+                session.add(pkg)
+                await session.commit()
+                await session.refresh(pkg)
+                package_id = str(pkg.id)
+
+            await asyncio.gather(
+                *[
+                    _update_package_item(
+                        package_id, "videos", i, {"status": "done", "video_url": f"url{i}"}
+                    )
+                    for i in range(5)
+                ]
+            )
+
+            async with AsyncSessionLocal() as session:
+                refreshed = await session.get(OnboardingPackage, uuid.UUID(package_id))
+
+            assert [v["status"] for v in refreshed.videos] == ["done"] * 5
+            assert [v.get("video_url") for v in refreshed.videos] == [f"url{i}" for i in range(5)]
+        finally:
+            _remove_test_db()

@@ -21,6 +21,7 @@ async def submit_render(
     on failure.
     """
     from manimstudio import ManimStudio
+    from manimstudio.exceptions import RenderError
 
     client = ManimStudio(
         api_key=settings.manimstudio_api_key,
@@ -32,7 +33,13 @@ async def submit_render(
         job.wait(timeout=timeout)
         return job.url, job.job_id
 
-    return await asyncio.get_event_loop().run_in_executor(None, blocking_render)
+    try:
+        return await asyncio.get_event_loop().run_in_executor(None, blocking_render)
+    except Exception as exc:
+        logger.exception("submit_render failed (scene=%s, quality=%s)", scene, quality)
+        if isinstance(exc, RenderError) and exc.logs:
+            logger.error("Sandbox logs for scene=%s:\n%s", scene, exc.logs)
+        raise
 
 
 async def render_and_save(
