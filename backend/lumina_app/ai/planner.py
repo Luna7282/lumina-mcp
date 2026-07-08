@@ -33,6 +33,7 @@ async def plan_visualization(
     graph: dict,
     summaries: dict[str, str],
     focus: str | None = None,
+    custom_instructions: str | None = None,
 ) -> list[ScenePlan]:
     god_nodes = graph.get("god_nodes", [])[:5]
     community_summary = graph.get("community_summary", {})
@@ -75,19 +76,45 @@ Return a JSON array of 3-5 scene plans. Each element:
   "community_id": 0
 }}"""
 
+    if custom_instructions:
+        user_message += f"\n\nAdditional instructions from the user:\n{custom_instructions}"
+
+    system = """You are a technical animation director. Plan Manim scenes
+that explain a codebase visually. Each scene must be distinct and
+illuminate a different architectural concept.
+
+SCENE TYPE GUIDELINES:
+- Scene 1: ALWAYS an architecture overview showing layers/structure
+- Scene 2: A data flow or request lifecycle if routes/APIs exist
+- Scene 3: Data models / class hierarchy if models exist
+- Scene 4: A specific community or subsystem detail
+- Scene 5: Optional — only if there's a truly distinct concept
+
+NAMING CONVENTION:
+- Use descriptive names: ArchitectureOverview, AuthRequestFlow,
+  UserModelHierarchy, DatabaseLayer, ServiceCommunity
+- NOT generic names like: Overview, Scene1, CodeScene
+
+For each scene, relevant_files should contain ONLY the files
+directly involved in that concept (2-5 files max, not all files).
+
+Return ONLY a valid JSON array. No markdown. No explanation.
+Each element: {
+  "scene_name": "DescriptivePythonClassName",
+  "title": "Human Readable Title (max 40 chars)",
+  "description": "Specific description of what to animate and how.
+                  Mention specific class names, route paths, or
+                  relationships from the summaries.",
+  "relevant_files": ["only", "relevant", "files"],
+  "community_id": 0
+}"""
+
     try:
         client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
         message = await client.messages.create(
             model=settings.anthropic_model_smart,
             max_tokens=1000,
-            system=(
-                "You are a technical visualization expert. "
-                "Plan 3-5 Manim animation scenes that explain "
-                "a codebase's architecture. Each scene should "
-                "illuminate one key concept. "
-                "Return ONLY valid JSON array, no markdown, "
-                "no explanation."
-            ),
+            system=system,
             messages=[{"role": "user", "content": user_message}],
         )
         raw = _extract_text(message).strip()

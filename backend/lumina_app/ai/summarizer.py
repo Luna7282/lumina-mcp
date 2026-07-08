@@ -24,6 +24,7 @@ async def summarize_file(
     path: str,
     nodes: list[dict],
     edges: list[dict],
+    custom_instructions: str | None = None,
 ) -> str:
     classes = [n["label"] for n in nodes if n["type"] == "class"]
     functions = [n["label"] for n in nodes if n["type"] in ("function", "method")]
@@ -56,16 +57,20 @@ async def summarize_file(
 
     context = "\n".join(context_parts)
 
+    system = (
+        "Summarize what this code file does in 2-3 sentences. "
+        "Be specific about its main classes, functions, and purpose. "
+        "Output only the summary, no preamble."
+    )
+    if custom_instructions:
+        system += f"\n\nUser's custom requirements:\n{custom_instructions}"
+
     try:
         client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
         message = await client.messages.create(
             model=settings.anthropic_model_fast,
             max_tokens=150,
-            system=(
-                "Summarize what this code file does in 2-3 sentences. "
-                "Be specific about its main classes, functions, and purpose. "
-                "Output only the summary, no preamble."
-            ),
+            system=system,
             messages=[{"role": "user", "content": context}],
         )
         return _extract_text(message).strip()
@@ -84,6 +89,7 @@ async def summarize_codebase(
     graph: dict,
     db_files: list,
     db,
+    custom_instructions: str | None = None,
 ) -> dict[str, str]:
     nodes = graph.get("nodes", [])
     edges = graph.get("edges", [])
@@ -103,7 +109,7 @@ async def summarize_codebase(
             return
         async with semaphore:
             file_nodes = nodes_by_file.get(path, [])
-            summary = await summarize_file(path, file_nodes, edges)
+            summary = await summarize_file(path, file_nodes, edges, custom_instructions)
             summaries[path] = summary
             db_file.summary = summary
 

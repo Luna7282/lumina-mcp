@@ -148,6 +148,7 @@ class ExplainRequest(BaseModel):
     codebase_id: str
     focus: str | None = None
     quality: str = "low"
+    custom_instructions: str | None = None
 
 
 class ExplainResponse(BaseModel):
@@ -175,16 +176,18 @@ async def explain_codebase(
     db_files = files_result.scalars().all()
 
     # Summarize (uses cache)
-    summaries = await summarize_codebase(codebase.graph, db_files, db)
+    summaries = await summarize_codebase(codebase.graph, db_files, db, request.custom_instructions)
     await db.commit()
 
     # Plan scenes
-    scene_plans = await plan_visualization(codebase.graph, summaries, request.focus)
+    scene_plans = await plan_visualization(
+        codebase.graph, summaries, request.focus, request.custom_instructions
+    )
 
     # Generate Manim code
     scene_codes = []
     for plan in scene_plans:
-        code = await generate_scene(plan, summaries, codebase.graph)
+        code = await generate_scene(plan, summaries, codebase.graph, request.custom_instructions)
         scene_codes.append(code)
 
     # Combine — remove duplicate "from manim import *" lines

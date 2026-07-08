@@ -3,6 +3,71 @@ import anthropic
 from lumina_app.ai.planner import ScenePlan
 from lumina_app.settings import settings
 
+SCENE_PATTERNS = {
+    "overview": """
+VISUAL PATTERN for architecture overview:
+- Start: project title Text fades in center, then moves to top
+- Middle: show 2-4 horizontal layers as colored Rectangles stacked vertically:
+    Layer colors: BLUE_E (frontend/UI), GREEN_E (API/routes),
+                  YELLOW_E (services/logic), RED_E (database/models)
+  Each layer: Rectangle with Text label inside, animate Create() bottom-up
+  Between layers: Arrow pointing down, animate with GrowArrow()
+- Highlight: the most-connected god node pulses with a surrounding Circle
+- End: all elements stay visible, self.wait(1)
+""",
+    "flow": """
+VISUAL PATTERN for data/request flow:
+- Show 4-6 components as labeled rectangles arranged left-to-right
+- Animate a moving dot (small Circle) traveling along arrows between them
+  Use MoveAlongPath or sequential moves with rate_func=smooth
+- Each arrow has a small label (calls/handles/imports) above it
+- Use color coding: entry points in BLUE, processing in GREEN, storage in RED
+- End with all arrows visible showing the complete flow path
+""",
+    "models": """
+VISUAL PATTERN for data models / class hierarchy:
+- Show classes as rectangles with class name at top, fields listed below
+- Draw inheritance arrows (hollow arrowhead style) from child to parent
+- Use WHITE for base classes, BLUE for models, GREEN for mixins
+- Arrange in a tree: base class at top, subclasses below
+- Animate: base appears first, then subclasses appear one by one with arrows
+""",
+    "components": """
+VISUAL PATTERN for component/community detail:
+- Arrange 3-7 files as labeled circles in a cluster
+- Size each circle proportional to its degree (more connections = bigger)
+- Draw edges between circles with different colors per relation type:
+    calls: BLUE arrows, imports: GREEN arrows, inherits: YELLOW arrows
+- The god node circle is WHITE/brightest
+- Animate: circles appear, then edges draw in one by one
+- End: rotate the whole cluster slowly for 2 seconds
+""",
+    "default": """
+VISUAL PATTERN (general):
+- Title at top, content in center
+- Use at least 3 different Manim objects (Text, Rectangle, Arrow, Circle)
+- Minimum 3 distinct animations (not just FadeIn everything at once)
+- Show relationships with directional arrows
+- Use color to distinguish different types of components
+- Keep text labels short (max 20 chars) and legible (font_size >= 24)
+""",
+}
+
+
+def _get_scene_pattern(scene_name: str, description: str) -> str:
+    """Pick the most relevant visual pattern for this scene."""
+    name_lower = scene_name.lower()
+    desc_lower = description.lower()
+    if any(w in name_lower + desc_lower for w in ["overview", "architecture", "structure"]):
+        return SCENE_PATTERNS["overview"]
+    if any(w in name_lower + desc_lower for w in ["flow", "request", "pipeline", "sequence"]):
+        return SCENE_PATTERNS["flow"]
+    if any(w in name_lower + desc_lower for w in ["model", "schema", "class", "inherit", "entity"]):
+        return SCENE_PATTERNS["models"]
+    if any(w in name_lower + desc_lower for w in ["component", "module", "community", "cluster"]):
+        return SCENE_PATTERNS["components"]
+    return SCENE_PATTERNS["default"]
+
 
 def _extract_text(message) -> str:
     """Return the first text block's content.
@@ -45,6 +110,7 @@ async def generate_scene(
     plan: ScenePlan,
     summaries: dict[str, str],
     graph: dict,
+    custom_instructions: str | None = None,
 ) -> str:
     relevant_summaries = "\n".join(
         f"  {f}: {summaries.get(f, 'No summary available')}" for f in plan.relevant_files
@@ -85,18 +151,48 @@ Key routes: {', '.join(key_routes) or 'none'}
 Key relationships:
 {edge_str or '  (none found)'}"""
 
-    system = f"""You are a Manim CE expert. Generate ONE Manim scene.
+    system = f"""You are a Manim CE expert creating educational animations.
+Generate ONE Manim scene class that visually explains the described concept.
+
 STRICT RULES:
-- Output ONLY valid Python code, zero markdown, zero backticks
+- Output ONLY valid Python code. Zero markdown. Zero backticks.
 - Class name must be exactly: {plan.scene_name}
-- Inherit from Scene only: class {plan.scene_name}(Scene):
-- First line must be: from manim import *
-- NEVER use MathTex or Tex — use Text() only
-- Use: Text, VGroup, Arrow, Rectangle, Circle,
-       FadeIn, FadeOut, Write, Create, Transform
-- Animate architecture as flowing diagrams
-- Keep total duration under 30 seconds
-- End with self.wait(1)"""
+- class {plan.scene_name}(Scene):
+- First line: from manim import *
+- NEVER use MathTex or Tex — ONLY Text()
+- NEVER use font_size below 20 (too small to read)
+- Keep all text under 25 characters per label
+- Total animation duration: 15-25 seconds
+- End with self.wait(1)
+
+AVAILABLE MANIM OBJECTS (use these, nothing else):
+  Text, VGroup, Arrow, CurvedArrow, Rectangle, RoundedRectangle,
+  Circle, Dot, Line, DashedLine, Polygon, Triangle
+
+AVAILABLE ANIMATIONS (be creative, use at least 4 different ones):
+  Create, Write, FadeIn, FadeOut, GrowArrow, Transform,
+  MoveAlongPath, AnimationGroup, LaggedStart, Succession,
+  Flash, Circumscribe, Indicate, ApplyWave
+
+COLOR PALETTE (use these for visual clarity):
+  BLUE_E, GREEN_E, YELLOW_E, RED_E, PURPLE_E,  # dark/background
+  BLUE_C, GREEN_C, YELLOW_C, RED_C, WHITE,      # main elements
+  BLUE_A, GREEN_A, YELLOW_A, RED_A, GRAY_A      # light/accent
+
+VISUAL PATTERN TO FOLLOW:
+{_get_scene_pattern(plan.scene_name, plan.description)}
+
+QUALITY CHECKLIST (your output MUST satisfy all):
+[ ] At least 4 distinct named Manim objects (not just Text everywhere)
+[ ] At least 4 different animation types used
+[ ] Color coding distinguishes different component types
+[ ] Relationships shown as directional arrows, not just boxes
+[ ] Text labels are short and readable (font_size >= 24)
+[ ] Animation tells a story: introduce → show relationships → conclude
+"""
+
+    if custom_instructions:
+        system += f"\n\nUser's custom requirements:\n{custom_instructions}"
 
     for attempt in range(2):
         try:

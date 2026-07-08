@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from lumina_app.ai.generator import generate_scene
+from lumina_app.ai.generator import SCENE_PATTERNS, _get_scene_pattern, generate_scene
 from lumina_app.ai.planner import ScenePlan, plan_visualization
 from lumina_app.ai.summarizer import summarize_codebase, summarize_file
 from lumina_app.main import app
@@ -64,6 +64,25 @@ def _mock_anthropic_client_with_thinking(mocker, text: str):
     ]
     mock_client.messages.create = AsyncMock(return_value=mock_message)
     return mock_client
+
+
+class TestScenePatterns:
+    def test_overview_keywords_select_overview_pattern(self):
+        assert _get_scene_pattern("ArchitectureOverview", "shows the overall structure") == (
+            SCENE_PATTERNS["overview"]
+        )
+
+    def test_flow_keywords_select_flow_pattern(self):
+        assert _get_scene_pattern("DataFlow", "request flow through the system") == SCENE_PATTERNS["flow"]
+
+    def test_model_keywords_select_models_pattern(self):
+        assert _get_scene_pattern("UserModelHierarchy", "class inheritance") == SCENE_PATTERNS["models"]
+
+    def test_component_keywords_select_components_pattern(self):
+        assert _get_scene_pattern("ServiceCommunity", "module cluster detail") == SCENE_PATTERNS["components"]
+
+    def test_unmatched_keywords_fall_back_to_default(self):
+        assert _get_scene_pattern("SomethingElse", "no matching keywords here") == SCENE_PATTERNS["default"]
 
 
 class TestSummarizeFile:
@@ -175,6 +194,27 @@ class TestPlanVisualization:
         plans = await plan_visualization({"god_nodes": [], "community_summary": {}, "language_summary": {}}, {})
         assert plans[0].scene_name == "RealPlan"
 
+    async def test_custom_instructions_appended_to_user_message(self, mocker):
+        plans_json = '[{"scene_name": "X", "title": "X", "description": "d", "relevant_files": []}]'
+        mock_client = _mock_anthropic_client(mocker, plans_json)
+        await plan_visualization(
+            {"god_nodes": [], "community_summary": {}, "language_summary": {}},
+            {},
+            custom_instructions="Focus on the authentication flow.",
+        )
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        user_content = call_kwargs["messages"][0]["content"]
+        assert "Additional instructions from the user:" in user_content
+        assert "Focus on the authentication flow." in user_content
+
+    async def test_no_custom_instructions_not_appended(self, mocker):
+        plans_json = '[{"scene_name": "X", "title": "X", "description": "d", "relevant_files": []}]'
+        mock_client = _mock_anthropic_client(mocker, plans_json)
+        await plan_visualization({"god_nodes": [], "community_summary": {}, "language_summary": {}}, {})
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        user_content = call_kwargs["messages"][0]["content"]
+        assert "Additional instructions from the user:" not in user_content
+
 
 class TestGenerateScene:
     async def test_strips_markdown_fences_correctly(self, mocker):
@@ -211,6 +251,23 @@ class TestGenerateScene:
         assert "class ExpectedScene(Scene):" in code
         assert mock_client.messages.create.await_count == 2
 
+    async def test_custom_instructions_appended_to_system_prompt(self, mocker):
+        code_text = "from manim import *\n\nclass MyScene(Scene):\n    def construct(self):\n        self.wait(1)\n"
+        mock_client = _mock_anthropic_client(mocker, code_text)
+        plan = ScenePlan(scene_name="MyScene", title="My Scene", description="d", relevant_files=[])
+        await generate_scene(plan, {}, {"nodes": [], "edges": []}, custom_instructions="Use a dark theme.")
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        assert "User's custom requirements:" in call_kwargs["system"]
+        assert "Use a dark theme." in call_kwargs["system"]
+
+    async def test_no_custom_instructions_not_appended_to_system(self, mocker):
+        code_text = "from manim import *\n\nclass MyScene(Scene):\n    def construct(self):\n        self.wait(1)\n"
+        mock_client = _mock_anthropic_client(mocker, code_text)
+        plan = ScenePlan(scene_name="MyScene", title="My Scene", description="d", relevant_files=[])
+        await generate_scene(plan, {}, {"nodes": [], "edges": []})
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        assert "User's custom requirements:" not in call_kwargs["system"]
+
 
 class TestExplainEndpoint:
     def test_explain_with_valid_codebase_returns_rendering(self, client, mocker):
@@ -243,6 +300,39 @@ class TestExplainEndpoint:
         assert data["codebase_id"] == codebase_id
         assert len(data["scenes"]) > 0
         assert data["scenes"] == ["Overview"]
+
+    def test_explain_accepts_and_forwards_custom_instructions(self, client, mocker):
+        analyze_response = client.post("/api/analyze", json={"name": "demo", "files": SAMPLE_FILES})
+        codebase_id = analyze_response.json()["codebase_id"]
+
+        summarize_mock = mocker.patch(
+            "lumina_app.main.summarize_codebase",
+            new_callable=AsyncMock,
+            return_value={"main.py": "Defines the app.", "models.py": "Defines User."},
+        )
+        plan_mock = mocker.patch(
+            "lumina_app.main.plan_visualization",
+            new_callable=AsyncMock,
+            return_value=[
+                ScenePlan(scene_name="Overview", title="Overview", description="d", relevant_files=["main.py"])
+            ],
+        )
+        generate_mock = mocker.patch(
+            "lumina_app.main.generate_scene",
+            new_callable=AsyncMock,
+            return_value="from manim import *\n\nclass Overview(Scene):\n    def construct(self):\n        self.wait(1)\n",
+        )
+        mocker.patch("lumina_app.renderer.render_and_save", new_callable=AsyncMock)
+
+        response = client.post(
+            "/api/explain",
+            json={"codebase_id": codebase_id, "custom_instructions": "Focus on the API layer."},
+        )
+        assert response.status_code == 200
+
+        assert summarize_mock.call_args.args[-1] == "Focus on the API layer."
+        assert plan_mock.call_args.args[-1] == "Focus on the API layer."
+        assert generate_mock.call_args.args[-1] == "Focus on the API layer."
 
     def test_explain_with_nonexistent_codebase_404(self, client, mocker):
         mocker.patch("lumina_app.renderer.render_and_save", new_callable=AsyncMock)
