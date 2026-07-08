@@ -92,6 +92,26 @@ def _read_local_path(path: str) -> dict[str, str]:
     return files
 
 
+def _poll_package(
+    client: httpx.Client,
+    package_id: str,
+    max_wait: int = 1800,
+) -> dict:
+    deadline = time.time() + max_wait
+    while time.time() < deadline:
+        r = client.get(f"/api/package/{package_id}")
+        r.raise_for_status()
+        data = r.json()
+        if data["status"] == "done":
+            return data
+        time.sleep(10)
+    return {
+        "status": "timeout",
+        "package_id": package_id,
+        "message": f"Use get_package_status('{package_id}') to check progress.",
+    }
+
+
 def _poll_video(
     client: httpx.Client,
     video_id: str,
@@ -423,6 +443,106 @@ def list_supported_languages() -> dict:
             "and scene planning. Raw code never leaves your machine."
         ),
     }
+
+
+# ─── TOOL 8: create_onboarding_package ───────────────────────────────────
+
+@mcp.tool
+def create_onboarding_package(
+    path: str = ".",
+    package_type: str = "full",
+    custom_instructions: str | None = None,
+    quality: str = "low",
+    wait: bool = True,
+) -> dict:
+    """
+    Generate a complete onboarding package for a codebase.
+    Creates multiple focused videos (one per architectural layer)
+    plus written documentation — everything needed to understand
+    the system.
+
+    package_type options:
+    - "full"      → 3-5 videos + architecture + onboarding + API docs
+    - "quick"     → 1 overview video + README
+    - "technical" → 3 videos + architecture + API docs
+
+    Each video focuses on ONE architectural subsystem:
+    e.g. AuthenticationFlow, RenderPipeline, DataModels, APIEndpoints
+
+    Args:
+        path:                Local path to analyze ("." for current dir)
+        package_type:        full | quick | technical
+        custom_instructions: Extra guidance. e.g.:
+                             "This is a SaaS platform, emphasize
+                              the billing and quota systems"
+        quality:             low | medium | high
+        wait:                True = block until all done (may take 10+ min)
+                             False = return package_id immediately
+
+    Returns when wait=True:
+        {
+          package_id, status: "done",
+          videos: [{focus, scene_name, video_url, status}],
+          docs: [{doc_type, filename, content, word_count}]
+        }
+    """
+    resolved = str(Path(path).resolve())
+    project_name = Path(resolved).name
+
+    try:
+        files = _read_local_path(resolved)
+    except ValueError as e:
+        return {"error": str(e)}
+
+    if not files:
+        return {
+            "error": f"No supported code files found in {resolved}",
+            "tip": "Check that the path contains .py, .ts, .go, etc. files",
+        }
+
+    with _client() as client:
+        r = client.post(
+            "/api/analyze",
+            json={"files": files, "name": project_name},
+            timeout=120.0,
+        )
+        r.raise_for_status()
+        codebase_id = r.json()["codebase_id"]
+
+        r = client.post(
+            "/api/onboard",
+            json={
+                "codebase_id": codebase_id,
+                "package_type": package_type,
+                "custom_instructions": custom_instructions,
+                "quality": quality,
+            },
+            timeout=30.0,
+        )
+        r.raise_for_status()
+        result = r.json()
+
+        if not wait:
+            return result
+
+        return _poll_package(client, result["package_id"])
+
+
+# ─── TOOL 9: get_package_status ──────────────────────────────────────────
+
+@mcp.tool
+def get_package_status(package_id: str) -> dict:
+    """
+    Check the status of an onboarding package generation.
+    Poll this after create_onboarding_package(wait=False).
+
+    Returns all videos and docs with their current status.
+    Videos and docs with status='done' include their URLs/content.
+    """
+    with _client() as client:
+        r = client.get(f"/api/package/{package_id}")
+        r.raise_for_status()
+        return r.json()
 
 
 # ─── Entry point ─────────────────────────────────────────────────────────

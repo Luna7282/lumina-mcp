@@ -32,6 +32,9 @@ class Codebase(Base):
     videos: Mapped[list["CodebaseVideo"]] = relationship(
         back_populates="codebase", cascade="all, delete-orphan"
     )
+    packages: Mapped[list["OnboardingPackage"]] = relationship(
+        back_populates="codebase", cascade="all, delete-orphan"
+    )
 
 
 class CodebaseFile(Base):
@@ -74,3 +77,25 @@ class CodebaseVideo(Base):
     )
 
     codebase: Mapped["Codebase"] = relationship(back_populates="videos")
+
+
+class OnboardingPackage(Base):
+    __tablename__ = "onboarding_packages"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    codebase_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("codebases.id"), index=True
+    )
+    package_type: Mapped[str] = mapped_column(String(50), default="full")
+    status: Mapped[str] = mapped_column(String(50), default="generating")
+    # list of {focus, scene_name, video_id, video_url, status}
+    videos: Mapped[list] = mapped_column(JSON, default=list)
+    # list of {doc_type, filename, content, status}
+    docs: Mapped[list] = mapped_column(JSON, default=list)
+    custom_instructions: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    codebase: Mapped["Codebase"] = relationship(back_populates="packages")

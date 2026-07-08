@@ -230,6 +230,90 @@ class TestGetCodebaseGraph:
         assert result == graph
 
 
+ONBOARD_RESULT = {
+    "package_id": "pkg-1",
+    "status": "generating",
+    "codebase_id": "cb-1",
+    "videos": [{"focus": "Auth Flow", "scene_name": "AuthFlow", "video_url": None, "status": "pending"}],
+    "docs": [{"doc_type": "readme", "filename": None, "content": None, "status": "pending"}],
+}
+
+
+class TestCreateOnboardingPackage:
+    def test_calls_analyze_then_onboard(self, mocker, tmp_path):
+        (tmp_path / "main.py").write_text("print('hi')")
+        client = _mock_client(
+            mocker, post_side_effect=[_response(ANALYZE_RESULT), _response(ONBOARD_RESULT)]
+        )
+
+        result = server.create_onboarding_package(str(tmp_path), wait=False)
+
+        assert client.post.call_count == 2
+        first_call, second_call = client.post.call_args_list
+        assert first_call.args[0] == "/api/analyze"
+        assert second_call.args[0] == "/api/onboard"
+        assert second_call.kwargs["json"]["codebase_id"] == "cb-1"
+        assert result == ONBOARD_RESULT
+
+    def test_returns_immediately_when_wait_false(self, mocker, tmp_path):
+        (tmp_path / "main.py").write_text("print('hi')")
+        client = _mock_client(
+            mocker, post_side_effect=[_response(ANALYZE_RESULT), _response(ONBOARD_RESULT)]
+        )
+
+        result = server.create_onboarding_package(str(tmp_path), wait=False)
+
+        client.get.assert_not_called()
+        assert result == ONBOARD_RESULT
+
+    def test_polls_until_done(self, mocker, tmp_path):
+        (tmp_path / "main.py").write_text("print('hi')")
+        mocker.patch("server.time.sleep")
+        client = _mock_client(
+            mocker,
+            post_side_effect=[_response(ANALYZE_RESULT), _response(ONBOARD_RESULT)],
+            get_side_effect=[
+                _response({"status": "generating"}),
+                _response({"status": "done", "videos": [], "docs": []}),
+            ],
+        )
+
+        result = server.create_onboarding_package(str(tmp_path), wait=True)
+
+        assert client.get.call_count == 2
+        assert result["status"] == "done"
+
+    def test_returns_error_for_nonexistent_path(self):
+        result = server.create_onboarding_package("/definitely/does/not/exist/xyz")
+        assert "error" in result
+
+    def test_forwards_package_type_and_custom_instructions(self, mocker, tmp_path):
+        (tmp_path / "main.py").write_text("print('hi')")
+        client = _mock_client(
+            mocker, post_side_effect=[_response(ANALYZE_RESULT), _response(ONBOARD_RESULT)]
+        )
+
+        server.create_onboarding_package(
+            str(tmp_path),
+            package_type="technical",
+            custom_instructions="Emphasize the render pipeline.",
+            wait=False,
+        )
+
+        onboard_call = client.post.call_args_list[1]
+        assert onboard_call.kwargs["json"]["package_type"] == "technical"
+        assert onboard_call.kwargs["json"]["custom_instructions"] == "Emphasize the render pipeline."
+
+
+class TestGetPackageStatus:
+    def test_calls_get_api_package(self, mocker):
+        client = _mock_client(mocker, get_side_effect=[_response({"status": "done"})])
+        result = server.get_package_status("pkg-1")
+
+        client.get.assert_called_once_with("/api/package/pkg-1")
+        assert result == {"status": "done"}
+
+
 class TestListSupportedLanguages:
     def test_returns_expected_structure(self):
         result = server.list_supported_languages()

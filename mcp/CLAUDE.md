@@ -58,6 +58,33 @@ explain_codebase(codebase_id=id, focus="API routes")
 generate_docs(codebase_id=id, doc_type="architecture")
 ```
 
+## Full onboarding package
+
+Generate everything at once — videos + docs for the whole codebase:
+```
+create_onboarding_package(
+  path=".",
+  package_type="full",
+  custom_instructions="This is a Manim rendering SaaS.
+    Emphasize the sandbox security and render pipeline.",
+  quality="low",
+)
+```
+
+This generates in parallel:
+- One focused video per architectural layer (3-5 videos)
+- ARCHITECTURE.md
+- ONBOARDING.md
+- API.md
+
+For a quick overview:
+```
+create_onboarding_package(path=".", package_type="quick")
+```
+
+Pass `wait=False` to get a `package_id` back immediately instead of
+blocking, then poll with `get_package_status(package_id)`.
+
 ## Privacy
 Tree-sitter parses code locally — no raw source sent to AI.
 Only 2-3 sentence file summaries go to the Anthropic API.

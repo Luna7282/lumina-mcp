@@ -8,14 +8,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumina_app.ai.documenter import DOC_TYPES, generate_docs
 from lumina_app.ai.generator import generate_scene
-from lumina_app.ai.planner import plan_visualization
+from lumina_app.ai.planner import plan_onboarding_videos, plan_visualization
 from lumina_app.ai.summarizer import summarize_codebase
 from lumina_app.database import create_all_tables, get_db
 from lumina_app.extract.cache import codebase_hash, compute_hashes
 from lumina_app.extract.cluster import detect_communities, get_community_summary
 from lumina_app.extract.dispatch import extract_all
 from lumina_app.extract.graph import build_graph, get_god_nodes, get_language_summary
-from lumina_app.models import Codebase, CodebaseFile, CodebaseVideo
+from lumina_app.models import Codebase, CodebaseFile, CodebaseVideo, OnboardingPackage
+from lumina_app.onboarding import PACKAGE_DOC_TYPES, generate_package
 from lumina_app.schemas import AnalyzeRequest, AnalyzeResponse, CodebaseRead
 from lumina_app.settings import settings
 
@@ -323,3 +324,123 @@ async def get_codebase(codebase_id: uuid.UUID, db: AsyncSession = Depends(get_db
     if codebase is None:
         raise HTTPException(status_code=404, detail="codebase not found")
     return codebase
+
+
+class OnboardRequest(BaseModel):
+    codebase_id: str
+    package_type: str = "full"  # full|quick|technical
+    custom_instructions: str | None = None
+    quality: str = "low"
+
+    @field_validator("package_type")
+    @classmethod
+    def validate_package_type(cls, v):
+        if v not in ("full", "quick", "technical"):
+            raise ValueError("package_type must be full|quick|technical")
+        return v
+
+
+class OnboardResponse(BaseModel):
+    package_id: str
+    status: str
+    codebase_id: str
+    videos: list[dict]
+    docs: list[dict]
+
+
+@app.post("/api/onboard", response_model=OnboardResponse)
+async def create_onboarding_package(
+    request: OnboardRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate a full onboarding package: one focused video per
+    architectural community plus all applicable doc types, in parallel."""
+    codebase = await db.get(Codebase, uuid.UUID(request.codebase_id))
+    if not codebase:
+        raise HTTPException(404, "Codebase not found")
+
+    # Load file records and summaries (cached)
+    files_result = await db.execute(select(CodebaseFile).where(CodebaseFile.codebase_id == codebase.id))
+    db_files = files_result.scalars().all()
+    summaries = await summarize_codebase(codebase.graph, db_files, db)
+    await db.commit()
+
+    # Plan videos based on communities, and pick doc types for this package
+    video_plans = await plan_onboarding_videos(codebase.graph, summaries, request.package_type)
+    doc_types = PACKAGE_DOC_TYPES[request.package_type]
+
+    videos_meta = [
+        {
+            "focus": plan.title,
+            "scene_name": plan.scene_name,
+            "video_id": None,
+            "video_url": None,
+            "status": "pending",
+        }
+        for plan in video_plans
+    ]
+    docs_meta = [{"doc_type": dt, "filename": None, "content": None, "status": "pending"} for dt in doc_types]
+
+    package = OnboardingPackage(
+        codebase_id=codebase.id,
+        package_type=request.package_type,
+        status="generating",
+        videos=videos_meta,
+        docs=docs_meta,
+        custom_instructions=request.custom_instructions,
+    )
+    db.add(package)
+    await db.commit()
+    await db.refresh(package)
+
+    package_id = str(package.id)
+
+    # Generate every video and doc in parallel in the background — see
+    # render_and_save's docstring for why this can't reuse the
+    # request-scoped `db` session.
+    background_tasks.add_task(
+        generate_package,
+        package_id,
+        codebase.graph,
+        summaries,
+        video_plans,
+        doc_types,
+        request.custom_instructions,
+        request.quality,
+    )
+
+    return OnboardResponse(
+        package_id=package_id,
+        status="generating",
+        codebase_id=request.codebase_id,
+        videos=videos_meta,
+        docs=docs_meta,
+    )
+
+
+@app.get("/api/package/{package_id}")
+async def get_package(package_id: str, db: AsyncSession = Depends(get_db)):
+    package = await db.get(OnboardingPackage, uuid.UUID(package_id))
+    if not package:
+        raise HTTPException(404, "Package not found")
+    return {
+        "package_id": str(package.id),
+        "status": package.status,
+        "codebase_id": str(package.codebase_id),
+        "package_type": package.package_type,
+        "videos": package.videos,
+        "docs": [
+            {
+                "doc_type": d["doc_type"],
+                "filename": d["filename"],
+                "status": d["status"],
+                # Only include content once done — could be large.
+                "content": d.get("content") if d["status"] == "done" else None,
+                "word_count": len(d["content"].split()) if d.get("content") else 0,
+            }
+            for d in package.docs
+        ],
+        "created_at": package.created_at.isoformat(),
+        "completed_at": package.completed_at.isoformat() if package.completed_at else None,
+    }
