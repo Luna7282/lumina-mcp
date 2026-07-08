@@ -68,6 +68,7 @@ class CodebaseVideo(Base):
     manim_code: Mapped[str | None] = mapped_column(Text)
     render_job_id: Mapped[str | None] = mapped_column(String(100))
     status: Mapped[str] = mapped_column(String(50), default="pending")
+    error_message: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

@@ -2,10 +2,11 @@ import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumina_app.ai.documenter import DOC_TYPES, generate_docs
 from lumina_app.ai.generator import generate_scene
 from lumina_app.ai.planner import plan_visualization
 from lumina_app.ai.summarizer import summarize_codebase
@@ -253,13 +254,65 @@ async def get_video(video_id: str, db: AsyncSession = Depends(get_db)):
         "focus": video.focus,
         "codebase_id": str(video.codebase_id),
         "created_at": video.created_at.isoformat(),
+        "error_message": video.error_message,
     }
 
 
-@app.post("/api/docs")
-async def generate_docs():
+class DocsRequest(BaseModel):
+    codebase_id: str
+    doc_type: str = "readme"  # readme|architecture|api|onboarding
+    custom_instructions: str | None = None
+
+    @field_validator("doc_type")
+    @classmethod
+    def validate_doc_type(cls, v):
+        if v not in DOC_TYPES:
+            raise ValueError(f"doc_type must be one of: {list(DOC_TYPES.keys())}")
+        return v
+
+
+class DocsResponse(BaseModel):
+    codebase_id: str
+    doc_type: str
+    filename: str
+    content: str  # the generated markdown
+    word_count: int
+
+
+@app.post("/api/docs", response_model=DocsResponse)
+async def generate_documentation(
+    request: DocsRequest,
+    db: AsyncSession = Depends(get_db),
+):
     """Generate markdown documentation for a codebase."""
-    return {"status": "not_implemented"}
+    codebase = await db.get(Codebase, uuid.UUID(request.codebase_id))
+    if not codebase:
+        raise HTTPException(404, "Codebase not found")
+
+    # Load cached file summaries
+    files_result = await db.execute(select(CodebaseFile).where(CodebaseFile.codebase_id == codebase.id))
+    db_files = files_result.scalars().all()
+
+    # Use cached summaries, generate missing ones
+    summaries = await summarize_codebase(codebase.graph, db_files, db)
+    await db.commit()
+
+    # Generate docs
+    doc_config = DOC_TYPES[request.doc_type]
+    markdown = await generate_docs(
+        graph=codebase.graph,
+        summaries=summaries,
+        doc_type=request.doc_type,
+        custom_instructions=request.custom_instructions,
+    )
+
+    return DocsResponse(
+        codebase_id=request.codebase_id,
+        doc_type=request.doc_type,
+        filename=doc_config["title"],
+        content=markdown,
+        word_count=len(markdown.split()),
+    )
 
 
 @app.get("/api/codebase/{codebase_id}", response_model=CodebaseRead)

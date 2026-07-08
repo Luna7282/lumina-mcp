@@ -77,7 +77,3 @@ class AnalyzeResponse(BaseModel):
     community_count: int
     language_summary: dict[str, int]
     cached: bool  # True if this content_hash was already analyzed
-
-
-class DocsRequest(BaseModel):
-    codebase_id: uuid.UUID

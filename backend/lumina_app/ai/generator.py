@@ -204,9 +204,15 @@ QUALITY CHECKLIST (your output MUST satisfy all):
                 messages=[{"role": "user", "content": user_message}],
             )
             code = _strip_fences(_extract_text(message))
-            if f"class {plan.scene_name}(Scene):" in code:
-                return code
-            # Scene name not found — retry once
+            if f"class {plan.scene_name}(Scene):" not in code:
+                # Scene name not found — retry once
+                continue
+            try:
+                compile(code, f"<scene:{plan.scene_name}>", "exec")
+            except SyntaxError:
+                # Response likely got truncated by max_tokens — retry once
+                continue
+            return code
         except Exception:
             break
 

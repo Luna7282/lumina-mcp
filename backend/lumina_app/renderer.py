@@ -1,7 +1,10 @@
 import asyncio
+import logging
 from uuid import UUID
 
 from lumina_app.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 async def render_and_save(
@@ -16,6 +19,8 @@ async def render_and_save(
     closed by then, so this opens its own fresh session via
     AsyncSessionLocal rather than accepting one as a parameter.
     """
+    from manimstudio.exceptions import RenderError
+
     from lumina_app.database import AsyncSessionLocal
     from lumina_app.models import CodebaseVideo
 
@@ -45,9 +50,15 @@ async def render_and_save(
                 video.render_job_id = job_id
                 await db.commit()
 
-    except Exception:
+    except Exception as exc:
+        logger.exception("Render failed for video %s", video_id)
+        error_message = str(exc)
+        if isinstance(exc, RenderError) and exc.logs:
+            error_message = f"{exc}\n\n{exc.logs}"
+
         async with AsyncSessionLocal() as db:
             video = await db.get(CodebaseVideo, UUID(video_id))
             if video:
                 video.status = "error"
+                video.error_message = error_message
                 await db.commit()
