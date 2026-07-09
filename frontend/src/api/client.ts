@@ -21,6 +21,30 @@ class ApiError extends Error {
   }
 }
 
+interface PydanticErrorItem {
+  loc?: (string | number)[];
+  msg?: string;
+}
+
+// FastAPI's default 422 body is [{loc, msg, type, input, url}, ...] — `input`
+// echoes back the full request payload (e.g. every uploaded file's content),
+// so naively stringifying `detail` can produce a multi-megabyte error
+// message. Pull out just the human-readable parts.
+function formatErrorDetail(detail: unknown, fallback: string): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const messages = (detail as PydanticErrorItem[])
+      .map((item) => {
+        if (typeof item?.msg !== "string") return null;
+        const field = item.loc?.filter((p) => p !== "body").join(".");
+        return field ? `${field}: ${item.msg}` : item.msg;
+      })
+      .filter((m): m is string => m !== null);
+    if (messages.length > 0) return messages.join("; ");
+  }
+  return fallback;
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     ...options,
@@ -31,14 +55,14 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
 
   if (!res.ok) {
-    let detail = res.statusText;
+    let message = res.statusText;
     try {
       const body = await res.json();
-      detail = body.detail ? JSON.stringify(body.detail) : detail;
+      message = formatErrorDetail(body.detail, message);
     } catch {
       // response wasn't JSON — fall back to statusText
     }
-    throw new ApiError(res.status, detail);
+    throw new ApiError(res.status, message);
   }
 
   return res.json() as Promise<T>;
