@@ -1,9 +1,12 @@
+import logging
 import re
 
 import anthropic
 
 from lumina_app.ai.planner import ScenePlan
 from lumina_app.settings import settings
+
+logger = logging.getLogger(__name__)
 
 WEB_DIAGRAM_PATTERN = """
 VISUAL PATTERN for architecture web diagram:
@@ -360,6 +363,10 @@ Key relationships:
     pattern_key = _scene_pattern_key(plan.scene_name, plan.description)
     pattern = SCENE_PATTERNS[pattern_key]
     is_multi_scene = pattern_key == "multi_scene"
+    # A multi-scene file needs 5+ Scene classes worth of code — 10000
+    # tokens is enough for one scene but risks truncating (and thus
+    # failing compile()) a full multi-scene response.
+    max_tokens = 16000 if is_multi_scene else 10000
 
     if is_multi_scene:
         opening = "Generate a COMPLETE multi-scene Python file with multiple Scene classes."
@@ -435,23 +442,39 @@ QUALITY CHECKLIST (your output MUST satisfy all):
             client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
             message = await client.messages.create(
                 model=settings.anthropic_model_smart,
-                max_tokens=10000,
+                max_tokens=max_tokens,
                 system=system,
                 messages=[{"role": "user", "content": user_message}],
             )
             code = _strip_fences(_extract_text(message))
+            logger.debug(
+                "Generated code for %s (%d chars, attempt %d):\n%s...",
+                plan.scene_name, len(code), attempt + 1, code[:500],
+            )
             if is_multi_scene:
                 scene_classes = re.findall(r"class\s+(\w+)\s*\(\s*Scene\s*\)", code)
                 if len(scene_classes) < 3:
                     # Need at least 3 scene classes for a multi-scene video
+                    logger.warning(
+                        "Multi-scene validation failed: only found %d Scene classes: %s. Retrying...",
+                        len(scene_classes), scene_classes,
+                    )
                     continue
             elif f"class {plan.scene_name}(Scene):" not in code:
                 # Scene name not found — retry once
+                logger.warning(
+                    "Scene name validation failed: '%s' not in generated code. First 200 chars: %s",
+                    plan.scene_name, code[:200],
+                )
                 continue
             try:
                 compile(code, f"<scene:{plan.scene_name}>", "exec")
-            except SyntaxError:
+            except SyntaxError as e:
                 # Response likely got truncated by max_tokens — retry once
+                logger.warning(
+                    "Syntax error in generated code for %s: %s. Line %s: %s",
+                    plan.scene_name, e, e.lineno, e.text,
+                )
                 continue
             return code
         except Exception:

@@ -1,10 +1,15 @@
+import logging
+import logging.handlers
+import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from lumina_app.ai.documenter import DOC_TYPES, generate_docs
 from lumina_app.ai.generator import generate_scene
@@ -21,6 +26,73 @@ from lumina_app.schemas import AnalyzeRequest, AnalyzeResponse, CodebaseRead
 from lumina_app.settings import settings
 
 
+def setup_logging() -> None:
+    """Configure root logging: a rotating debug-level file plus a console
+    handler, so AI-generation/render debug output survives past the
+    terminal scrollback and can be grepped later.
+
+    The console handler is also DEBUG (not just INFO) so the debug logs
+    added around scene generation/validation are visible live while
+    debugging a render failure. This doesn't reintroduce console noise —
+    httpx/httpcore/anthropic are capped at WARNING on their own loggers
+    below, which suppresses their chatter at the source regardless of the
+    handler's level.
+    """
+    log_dir = Path(__file__).parent.parent / "logs"
+    log_dir.mkdir(exist_ok=True)
+
+    # Rotating file handler — max 10MB per file, keep 5 backups
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_dir / "lumina.log",
+        maxBytes=10 * 1024 * 1024,  # 10MB
+        backupCount=5,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(logging.DEBUG)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.DEBUG)
+
+    # Format: timestamp | level | logger name | message
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+
+    # Root logger
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+    root.addHandler(file_handler)
+    root.addHandler(console_handler)
+
+    # Quiet noisy third-party loggers
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("anthropic").setLevel(logging.WARNING)
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+
+
+setup_logging()
+
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app):
+        super().__init__(app)
+        self.logger = logging.getLogger("lumina_app.requests")
+
+    async def dispatch(self, request, call_next):
+        start = time.time()
+        response = await call_next(request)
+        duration = (time.time() - start) * 1000
+        self.logger.info(
+            "%s %s -> %s (%.1fms)",
+            request.method, request.url.path, response.status_code, duration,
+        )
+        return response
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # startup — tables auto-created in dev; use alembic migrations in production
@@ -31,6 +103,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Lumina API", version="0.1.0", lifespan=lifespan)
+app.add_middleware(RequestLoggingMiddleware)
 
 
 @app.get("/health")

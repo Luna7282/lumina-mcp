@@ -7,3 +7,4 @@ node_modules/
 dist/
 *.db
 server.log
+logs/

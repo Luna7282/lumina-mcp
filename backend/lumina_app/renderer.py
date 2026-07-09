@@ -1,5 +1,8 @@
 import asyncio
+import http.client
 import logging
+import time
+import urllib.error
 from uuid import UUID
 
 from lumina_app.settings import settings
@@ -15,23 +18,49 @@ async def submit_render(
 ) -> tuple[str, str]:
     """Submit a Manim scene to ManimStudio and block until it's done.
 
-    ManimStudio's render()/wait() are blocking synchronous calls (they poll
-    over time.sleep) — run them in a thread pool so they don't block the
-    event loop. Returns (url, job_id); raises RenderError/RenderTimeoutError
-    on failure.
+    Polls the job manually (rather than the SDK's own job.wait()) so we can
+    retry when Cloudflare drops the idle HTTP connection mid-poll
+    (RemoteDisconnected) — the SDK's wait()/poll() has no retry of its own,
+    so a single dropped connection would otherwise crash the whole render.
+    Runs in a thread pool since it's a blocking, time.sleep-based poll loop.
+    Returns (url, job_id); raises RenderError/RenderTimeoutError on failure.
     """
-    from manimstudio import ManimStudio
-    from manimstudio.exceptions import RenderError
+    from manimstudio import ManimStudio, RenderError
 
     client = ManimStudio(
         api_key=settings.manimstudio_api_key,
         base_url=settings.manimstudio_base_url,
+        timeout=120.0,  # SDK default (30s) is too short for a slow poll round-trip
     )
 
-    def blocking_render():
+    def blocking_render() -> tuple[str, str]:
         job = client.render(code, quality=quality, scene=scene)
-        job.wait(timeout=timeout)
-        return job.url, job.job_id
+
+        deadline = time.time() + timeout
+        max_retries = 5
+        retry_count = 0
+
+        while time.time() < deadline:
+            try:
+                result = job.poll()
+                if result.status == "done":
+                    return job.url, job.job_id
+                if result.status == "error":
+                    raise RenderError(result.error or "Render failed", logs=result.logs or "")
+                time.sleep(3)
+                retry_count = 0  # reset only on a successful poll, not on every loop
+            except (http.client.RemoteDisconnected, ConnectionResetError, urllib.error.URLError) as e:
+                retry_count += 1
+                if retry_count > max_retries:
+                    raise
+                wait = min(5 * retry_count, 30)
+                logger.warning(
+                    "Connection error polling render status (attempt %d/%d): %s. Retrying in %ds...",
+                    retry_count, max_retries, e, wait,
+                )
+                time.sleep(wait)
+
+        raise RenderError(f"Render timed out after {timeout}s")
 
     try:
         return await asyncio.get_event_loop().run_in_executor(None, blocking_render)
