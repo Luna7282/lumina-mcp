@@ -6,7 +6,11 @@ import type {
   VideoStatus,
 } from "./types";
 
-const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+// Defaults to "" (relative) so requests hit the Vite dev server's own
+// origin and go through its /api proxy (see vite.config.ts) — that avoids
+// needing CORS on the backend. Set VITE_API_URL to call a different host
+// directly (e.g. in production, where the backend must send CORS headers).
+const BASE_URL = import.meta.env.VITE_API_URL || "";
 
 class ApiError extends Error {
   status: number;
