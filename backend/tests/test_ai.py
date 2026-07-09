@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from lumina_app.ai.generator import SCENE_PATTERNS, _get_scene_pattern, generate_scene
+from lumina_app.ai.generator import SCENE_PATTERNS, _get_scene_pattern, _scene_pattern_key, generate_scene
 from lumina_app.ai.planner import ScenePlan, plan_visualization
 from lumina_app.ai.summarizer import summarize_codebase, summarize_file
 from lumina_app.main import app
@@ -83,6 +83,12 @@ class TestScenePatterns:
 
     def test_unmatched_keywords_fall_back_to_default(self):
         assert _get_scene_pattern("SomethingElse", "no matching keywords here") == SCENE_PATTERNS["default"]
+
+    def test_folder_overview_scene_name_selects_folder_overview_key(self):
+        assert _scene_pattern_key("BackendFolderOverview", "d") == "folder_overview"
+
+    def test_complete_architecture_overview_selects_multi_scene_key(self):
+        assert _scene_pattern_key("CompleteArchitectureOverview", "d") == "multi_scene"
 
 
 class TestSummarizeFile:
@@ -276,8 +282,45 @@ class TestGenerateScene:
         call_kwargs = mock_client.messages.create.call_args.kwargs
         system_prompt = call_kwargs["system"]
         assert "LAYOUT RULES" in system_prompt
-        assert "Maximum 4 layers/boxes in one scene" in system_prompt
+        assert "Maximum 6 layers/boxes in one scene" in system_prompt
         assert "ARROW LABEL RULES" in system_prompt
+
+    async def test_multi_scene_accepts_three_or_more_scene_classes(self, mocker):
+        code_text = (
+            "from manim import *\n\n"
+            "class TitleScene(Scene):\n    def construct(self):\n        self.wait(1)\n\n"
+            "class WebScene(Scene):\n    def construct(self):\n        self.wait(1)\n\n"
+            "class JourneyScene(Scene):\n    def construct(self):\n        self.wait(1)\n"
+        )
+        mock_client = _mock_anthropic_client(mocker, code_text)
+        plan = ScenePlan(
+            scene_name="CompleteArchitectureOverview",
+            title="Complete Architecture Overview",
+            description="d",
+            relevant_files=[],
+        )
+        code = await generate_scene(plan, {}, {"nodes": [], "edges": []})
+        assert code == code_text.strip()
+        assert mock_client.messages.create.await_count == 1
+
+    async def test_multi_scene_rejects_only_two_scene_classes(self, mocker):
+        code_text = (
+            "from manim import *\n\n"
+            "class TitleScene(Scene):\n    def construct(self):\n        self.wait(1)\n\n"
+            "class WebScene(Scene):\n    def construct(self):\n        self.wait(1)\n"
+        )
+        mock_client = _mock_anthropic_client(mocker, code_text)
+        plan = ScenePlan(
+            scene_name="CompleteArchitectureOverview",
+            title="Complete Architecture Overview",
+            description="d",
+            relevant_files=[],
+        )
+        code = await generate_scene(plan, {}, {"nodes": [], "edges": []})
+        # Both retries return the same too-short code, so it exhausts
+        # retries and falls back to a trivial single scene.
+        assert mock_client.messages.create.await_count == 2
+        assert "class CompleteArchitectureOverview(Scene):" in code
 
 
 class TestExplainEndpoint:

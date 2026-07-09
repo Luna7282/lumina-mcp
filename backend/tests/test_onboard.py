@@ -236,6 +236,10 @@ class TestPlanFolderVideos:
         assert len(plans) == 2
         assert {p.scene_name for p in plans} == {"BackendFolderOverview", "WorkerFolderOverview"}
         assert all(p.relevant_files for p in plans)
+        # Description must contain the "FolderOverview" keyword so
+        # _scene_pattern_key/generate_scene's prompt clearly signals the
+        # folder_overview visual pattern, not the generic overview one.
+        assert all("FolderOverview" in p.description for p in plans)
 
     async def test_caps_at_five_even_if_more_folders_given(self):
         folders = [f"folder{i}" for i in range(8)]

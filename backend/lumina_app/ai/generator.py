@@ -1,3 +1,5 @@
+import re
+
 import anthropic
 
 from lumina_app.ai.planner import ScenePlan
@@ -40,63 +42,56 @@ IMPORTANT: Position nodes using polar coordinates:
   Convert: x = radius * cos(angle), y = radius * sin(angle)
 """
 
-# The 5 Scene subclasses a multi_scene generation must produce. Referenced
-# both in the prompt text below and in generate_scene's validation, so the
-# two can never drift out of sync.
-MULTI_SCENE_REQUIRED_CLASSES = [
-    "TitleScene",
-    "ArchitectureWebScene",
-    "RequestJourneyScene",
-    "FolderOverviewScene",
-    "DocsReferenceScene",
-]
-
 MULTI_SCENE_PATTERN = f"""
 VISUAL PATTERN for multi-scene narrative video:
-This generates a COMPLETE multi-scene Python file with
-multiple Scene classes. All scenes will be rendered and
-combined into one video.
+Generate a COMPLETE Python file with AT LEAST 5 Scene classes.
+All scenes will be rendered and combined into one long video.
 
-STRUCTURE — generate ALL of these scene classes:
+NAME your scene classes descriptively based on the actual codebase:
+  - First scene: always a title/intro scene
+  - Second scene: architecture web diagram (all major components)
+  - Third scene: main request/data flow through the system
+  - Fourth scene: folder-by-folder overview (one slide per folder)
+  - Fifth scene: docs reference and how to learn more
+  - Add MORE scenes if the codebase has distinct subsystems to show
 
-class TitleScene(Scene):
-    # Project name + one-line description
-    # Duration: 8 seconds
-    # Simple: big title, subtitle, fade in/out
+Each scene class:
+  - Inherits from Scene
+  - Has its own construct() method
+  - 20-60 seconds duration
+  - Stands alone (no shared state between scenes)
 
-class ArchitectureWebScene(Scene):
-    # Folder-level web diagram:
+The first scene (title/intro):
+  - Project name as large Text
+  - One-sentence description below
+  - Technology stack badges (colored rectangles)
+  - Duration: 10-15 seconds
+
+The web diagram scene:
 {WEB_DIAGRAM_PATTERN}
-    # Duration: 20-30 seconds
-    # Show all top-level folders as nodes with connections
+The request journey scene:
+  - Show a glowing Dot traveling through 5-7 components
+  - Each component is a colored RoundedRectangle
+  - Label each step of the journey
+  - Duration: 25-35 seconds
 
-class RequestJourneyScene(Scene):
-    # Animate a request traveling through the system
-    # Duration: 20-25 seconds
-    # Show: User -> Frontend -> API -> Auth -> Quota -> Worker -> Storage -> Response
-    # Use moving dot/packet traveling through colored components
+The folder overview scene:
+  - For each major folder, show:
+    * Folder name as header
+    * 3-5 key files/classes as bullet points
+    * What this folder does
+  - Transition between folders with FadeOut/FadeIn
+  - Duration: 5-8 seconds per folder
 
-class FolderOverviewScene(Scene):
-    # One slide per major folder (2-4 folders)
-    # Duration: 5 seconds per folder
-    # Each: folder name + what it contains (3-5 bullet points)
-    # Transition between folders with Transform or FadeOut/FadeIn
+The docs reference scene:
+  - Title: "Learn More"
+  - List all generated docs:
+    * ARCHITECTURE.md
+    * ONBOARDING.md
+    * docs/[folder]/README.md for each folder
+  - Duration: 8-10 seconds
 
-class DocsReferenceScene(Scene):
-    # Final scene pointing to generated docs
-    # Duration: 8 seconds
-    # Show: "For deeper dives:" then list the generated MD files
-    # e.g. "- ARCHITECTURE.md - full system docs"
-    #      "- docs/backend/README.md - backend internals"
-    #      "- docs/worker/README.md - render pipeline"
-
-IMPORTANT RULES for multi-scene files:
-- Each class is a separate Scene that inherits from Scene
-- First line of file: from manim import *
-- Each class has its own construct() method
-- No shared state between classes
-- All classes must be independently renderable
-- Total combined duration: 60-120 seconds
+TOTAL target: 120-300 seconds (2-5 minutes)
 """
 
 SCENE_PATTERNS = {
@@ -166,6 +161,41 @@ VISUAL PATTERN (general):
 """,
     "web_diagram": WEB_DIAGRAM_PATTERN,
     "multi_scene": MULTI_SCENE_PATTERN,
+    "folder_overview": """
+VISUAL PATTERN for folder deep-dive:
+Tell the story of ONE folder — what it contains and how it works.
+
+Structure (30-50 seconds total):
+
+1. INTRO (5 sec):
+   - Folder name as large Text at top
+   - Subtitle: what this folder does in one line
+
+2. FILES IN THIS FOLDER (10-15 sec):
+   - Show 3-6 files as labeled rectangles arranged vertically
+   - Color by file type: Python=BLUE_E, TypeScript=GREEN_E,
+     Config=GRAY_A, Test=YELLOW_E
+   - Each rectangle appears one by one with Create()
+   - File name inside, small description below it
+
+3. KEY RELATIONSHIPS (10-15 sec):
+   - Show the most important calls/imports between files
+   - Animate arrows drawing between the file rectangles
+   - Label each arrow with what it does: "calls", "imports",
+     "configures"
+   - Highlight the most-connected file with Indicate()
+
+4. HOW IT CONNECTS TO REST OF SYSTEM (8-10 sec):
+   - Show this folder as one node
+   - Show 2-3 OTHER folders it connects to as nodes
+   - Draw arrows between them with connection type labels
+
+5. OUTRO (5 sec):
+   - Text: "See docs/[folder]/README.md for details"
+   - FadeOut everything
+
+Use self.wait(1.5) between each section.
+""",
 }
 
 LAYOUT_RULES = """
@@ -173,13 +203,17 @@ LAYOUT RULES (strictly follow these):
 - Manim frame is 14.2 units wide × 8 units tall
 - Reserve top 1.5 units for title (y=3.5 to y=4.5)
 - Content area: y from -3.0 to 3.0 (6 units tall)
-- Maximum 4 layers/boxes in one scene
-- Each box height: 0.8 units, spacing: 1.2 units between centers
-- First box center: y=2.0, second: y=0.8, third: y=-0.4, fourth: y=-1.6
+- Maximum 6 layers/boxes in one scene
+- Each box height: 0.7 units, spacing: 1.0 units between centers
+- Box centers (top to bottom): y=2.5, y=1.5, y=0.5, y=-0.5, y=-1.5, y=-2.5
+- For more than 6 items: use a 2-column grid layout instead
+  Left column: x=-3.0, Right column: x=3.0
+  Row centers: y=1.5, y=0.0, y=-1.5
 - Box width: 8 units max
 - All text font_size between 24 and 32
 - Never place anything below y=-3.5 or above y=4.0
-- If more than 4 items: show only the 4 most important ones
+- If more than 6 items: use the 2-column grid above, or show only
+  the 6 most important ones
 """
 
 ARROW_LABEL_RULES = """
@@ -200,11 +234,18 @@ def _scene_pattern_key(scene_name: str, description: str) -> str:
     "overview" keyword — plain single-scene overview plans (e.g.
     "ArchitectureOverview", "CodebaseOverview", produced by the community/
     god-node planners) already contain "overview" in their name, and this
-    must NOT route them into the multi-scene pattern: that pattern requires
-    5 differently-named classes, none matching plan.scene_name, which would
-    make generate_scene's class-name check fail every single scene of that
-    kind. Only the dedicated multi-scene overview plan ("CompleteArchitecture
-    Overview") is meant to land here, and it contains "complete".
+    must NOT route them into the multi-scene pattern: multi-scene code has
+    several classes with names that never match plan.scene_name, which
+    would make generate_scene's single-class-name check fail every single
+    scene of that kind. Only the dedicated multi-scene overview plan
+    ("CompleteArchitectureOverview") is meant to land here, and it contains
+    "complete".
+
+    "folder_overview" is checked next, also before the generic keyword
+    checks below — folder scene names (e.g. "BackendFolderOverview", from
+    plan_folder_videos) already contain "overview" too, and without this
+    check they'd wrongly fall into the generic single-component "overview"
+    journey pattern instead of the folder-specific one.
     """
     name_lower = scene_name.lower()
     desc_lower = description.lower()
@@ -216,6 +257,8 @@ def _scene_pattern_key(scene_name: str, description: str) -> str:
         or "complete architecture" in desc_lower
     ):
         return "multi_scene"
+    if "folderoverview" in name_lower or ("folder" in name_lower and "overview" in name_lower):
+        return "folder_overview"
     if any(w in name_lower + desc_lower for w in ["overview", "architecture", "structure"]):
         return "overview"
     if any(w in name_lower + desc_lower for w in ["flow", "request", "pipeline", "sequence"]):
@@ -321,16 +364,28 @@ Key relationships:
     if is_multi_scene:
         opening = "Generate a COMPLETE multi-scene Python file with multiple Scene classes."
         class_rules = (
-            f"- Generate ALL of these scene classes (see VISUAL PATTERN below for what "
-            f"each should contain): {', '.join(MULTI_SCENE_REQUIRED_CLASSES)}\n"
-            f"- Each is its own `class X(Scene):` with its own construct() method\n"
-            f"- No shared state between classes"
+            "- Generate AT LEAST 3 Scene classes (5+ recommended — see VISUAL "
+            "PATTERN below for suggested roles), each named descriptively for "
+            "what it shows\n"
+            "- Each is its own `class X(Scene):` with its own construct() method\n"
+            "- No shared state between classes"
         )
-        duration_rule = "- Total animation duration: 60-120 seconds combined across all scenes"
+        duration_rule = (
+            "- Total combined duration: 120-300 seconds (2-5 minutes)\n"
+            "- Each individual scene: 20-60 seconds\n"
+            "- Use self.wait(2) between major visual beats\n"
+            "- The goal is a thorough walkthrough, not a quick flash"
+        )
     else:
         opening = "Generate ONE Manim scene class that visually explains the described concept."
         class_rules = f"- Class name must be exactly: {plan.scene_name}\n- class {plan.scene_name}(Scene):"
-        duration_rule = "- Total animation duration: 15-25 seconds"
+        duration_rule = (
+            "- Total animation duration: 30-60 seconds\n"
+            "- Use self.wait() between animation steps to let "
+            "viewers absorb what they see\n"
+            "- Never rush — each component should appear and "
+            "settle before the next one starts"
+        )
 
     system = f"""You are a Manim CE expert creating educational animations.
 {opening}
@@ -386,8 +441,9 @@ QUALITY CHECKLIST (your output MUST satisfy all):
             )
             code = _strip_fences(_extract_text(message))
             if is_multi_scene:
-                if not all(f"class {c}(Scene):" in code for c in MULTI_SCENE_REQUIRED_CLASSES):
-                    # Missing one or more required scenes — retry once
+                scene_classes = re.findall(r"class\s+(\w+)\s*\(\s*Scene\s*\)", code)
+                if len(scene_classes) < 3:
+                    # Need at least 3 scene classes for a multi-scene video
                     continue
             elif f"class {plan.scene_name}(Scene):" not in code:
                 # Scene name not found — retry once

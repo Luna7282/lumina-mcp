@@ -115,7 +115,7 @@ Each element: {
         client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
         message = await client.messages.create(
             model=settings.anthropic_model_smart,
-            max_tokens=1000,
+            max_tokens=3000,
             system=system,
             messages=[{"role": "user", "content": user_message}],
         )
@@ -339,7 +339,7 @@ Each element: {{
         client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
         message = await client.messages.create(
             model=settings.anthropic_model_smart,
-            max_tokens=1500,
+            max_tokens=3000,
             system=system,
             messages=[{"role": "user", "content": user_message}],
         )
@@ -417,12 +417,16 @@ async def plan_folder_videos(
                 scene_name=scene_name,
                 title=f"{folder.title()} — Internal Architecture"[:40],
                 description=(
-                    f"Deep dive into the {folder}/ folder. "
-                    f"Show file relationships, key classes "
-                    f"({', '.join(classes[:3])}), "
-                    f"{'routes: ' + ', '.join(routes[:3]) + ', ' if routes else ''}"
-                    f"and how {folder} connects to the rest of the system. "
-                    f"End with: 'See docs/{folder}/README.md for more.'"
+                    f"FolderOverview: Deep dive into {folder}/. "
+                    f"Tell the story of this folder: show its {len(folder_files)} "
+                    f"files as colored rectangles, animate the key relationships "
+                    f"between them"
+                    + (f" (key classes: {', '.join(classes[:3])})" if classes else "")
+                    + (f" (routes: {', '.join(routes[:3])})" if routes else "")
+                    + f", then show how {folder}/ connects to other parts "
+                    f"of the system. "
+                    f"End with a slide: 'See docs/{folder}/README.md for more.' "
+                    f"Duration: 30-50 seconds. Use the folder_overview visual pattern."
                 ),
                 relevant_files=folder_files or list(summaries.keys())[:5],
             )
