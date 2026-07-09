@@ -262,7 +262,7 @@ class TestGeneratePackage:
             mocker.patch(
                 "lumina_app.onboarding.submit_render",
                 new_callable=AsyncMock,
-                return_value=("https://example.com/v.mp4", "job-123"),
+                return_value=("https://example.com/v.mp4", "job-123", ["https://example.com/v.mp4"]),
             )
             mocker.patch(
                 "lumina_app.onboarding.generate_docs",
@@ -314,6 +314,7 @@ class TestGeneratePackage:
             assert {v["folder"] for v in folder_videos} == {"backend", "worker"}
             assert all(v["is_overview"] is False for v in folder_videos)
             assert all(v["status"] == "done" for v in videos)
+            assert all(v["output_urls"] == ["https://example.com/v.mp4"] for v in videos)
 
             docs = refreshed.docs
             main_docs = [d for d in docs if d["folder"] is None]
@@ -338,7 +339,7 @@ class TestGeneratePackage:
             mocker.patch(
                 "lumina_app.onboarding.submit_render",
                 new_callable=AsyncMock,
-                return_value=("https://example.com/v.mp4", "job-123"),
+                return_value=("https://example.com/v.mp4", "job-123", ["https://example.com/v.mp4"]),
             )
             mocker.patch(
                 "lumina_app.onboarding.generate_docs",

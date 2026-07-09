@@ -426,6 +426,7 @@ class TestVideoEndpoint:
         assert data["codebase_id"] == codebase_id
         assert "focus" in data
         assert "created_at" in data
+        assert data["output_urls"] == []
 
     def test_get_video_nonexistent_404(self, client):
         random_id = "00000000-0000-0000-0000-000000000000"

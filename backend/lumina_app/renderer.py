@@ -15,7 +15,7 @@ async def submit_render(
     quality: str,
     scene: str | None = None,
     timeout: float = 1800.0,
-) -> tuple[str, str]:
+) -> tuple[str, str, list[str]]:
     """Submit a Manim scene to ManimStudio and block until it's done.
 
     Polls the job manually (rather than the SDK's own job.wait()) so we can
@@ -23,7 +23,10 @@ async def submit_render(
     (RemoteDisconnected) — the SDK's wait()/poll() has no retry of its own,
     so a single dropped connection would otherwise crash the whole render.
     Runs in a thread pool since it's a blocking, time.sleep-based poll loop.
-    Returns (url, job_id); raises RenderError/RenderTimeoutError on failure.
+    Returns (url, job_id, output_urls) — output_urls covers every rendered
+    scene (a multi-scene file renders one output per Scene class), with
+    `url` guaranteed to be its first element. Raises RenderError/
+    RenderTimeoutError on failure.
     """
     from manimstudio import ManimStudio, RenderError
 
@@ -33,7 +36,7 @@ async def submit_render(
         timeout=120.0,  # SDK default (30s) is too short for a slow poll round-trip
     )
 
-    def blocking_render() -> tuple[str, str]:
+    def blocking_render() -> tuple[str, str, list[str]]:
         job = client.render(code, quality=quality, scene=scene)
 
         deadline = time.time() + timeout
@@ -44,7 +47,10 @@ async def submit_render(
             try:
                 result = job.poll()
                 if result.status == "done":
-                    return job.url, job.job_id
+                    urls = list(job.output_urls) if job.output_urls else []
+                    if job.url and job.url not in urls:
+                        urls = [job.url] + urls
+                    return job.url, job.job_id, urls
                 if result.status == "error":
                     raise RenderError(result.error or "Render failed", logs=result.logs or "")
                 time.sleep(3)
@@ -89,13 +95,14 @@ async def render_and_save(
     from lumina_app.models import CodebaseVideo
 
     try:
-        url, job_id = await submit_render(code, quality)
+        url, job_id, output_urls = await submit_render(code, quality)
 
         async with AsyncSessionLocal() as db:
             video = await db.get(CodebaseVideo, UUID(video_id))
             if video:
                 video.status = "done"
                 video.video_url = url
+                video.output_urls = output_urls
                 video.render_job_id = job_id
                 await db.commit()
 

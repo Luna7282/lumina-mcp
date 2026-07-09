@@ -68,6 +68,7 @@ class CodebaseVideo(Base):
     )
     focus: Mapped[str] = mapped_column(String(500))  # "overview"|"auth flow" etc
     video_url: Mapped[str | None] = mapped_column(String(2000))
+    output_urls: Mapped[list] = mapped_column(JSON, default=list)
     manim_code: Mapped[str | None] = mapped_column(Text)
     render_job_id: Mapped[str | None] = mapped_column(String(100))
     status: Mapped[str] = mapped_column(String(50), default="pending")

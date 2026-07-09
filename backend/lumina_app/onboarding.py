@@ -141,10 +141,13 @@ async def _render_one_video(
         code = await generate_scene(plan, summaries, graph, custom_instructions)
         combined = f"from manim import *\n\n{code}"
 
-        url, job_id = await submit_render(combined, quality, scene=scene, timeout=timeout)
+        url, job_id, output_urls = await submit_render(combined, quality, scene=scene, timeout=timeout)
 
         await _update_package_item(
-            package_id, "videos", idx, {"video_id": job_id, "video_url": url, "status": "done"}
+            package_id,
+            "videos",
+            idx,
+            {"video_id": job_id, "video_url": url, "output_urls": output_urls, "status": "done"},
         )
 
     except Exception:

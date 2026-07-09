@@ -230,6 +230,7 @@ class ExplainResponse(BaseModel):
     video_id: str
     status: str
     video_url: str | None = None
+    output_urls: list[str] = []
     scenes: list[str]
     codebase_id: str
 
@@ -325,6 +326,7 @@ async def get_video(video_id: str, db: AsyncSession = Depends(get_db)):
         "video_id": str(video.id),
         "status": video.status,
         "video_url": video.video_url,
+        "output_urls": video.output_urls or [],
         "focus": video.focus,
         "codebase_id": str(video.codebase_id),
         "created_at": video.created_at.isoformat(),
