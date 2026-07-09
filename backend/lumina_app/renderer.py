@@ -19,9 +19,12 @@ async def submit_render(
     """Submit a Manim scene to ManimStudio and block until it's done.
 
     Polls the job manually (rather than the SDK's own job.wait()) so we can
-    retry when Cloudflare drops the idle HTTP connection mid-poll
-    (RemoteDisconnected) — the SDK's wait()/poll() has no retry of its own,
-    so a single dropped connection would otherwise crash the whole render.
+    retry on transient network failures — Cloudflare dropping the idle HTTP
+    connection mid-poll (RemoteDisconnected), or a single poll's read
+    exceeding the client's 120s timeout (TimeoutError) on a slow response
+    — the SDK's wait()/poll() has no retry of its own, so any one of these
+    would otherwise crash the whole render even for large, slow-to-render
+    scenes that are still progressing fine server-side.
     Runs in a thread pool since it's a blocking, time.sleep-based poll loop.
     Returns (url, job_id, output_urls) — output_urls covers every rendered
     scene (a multi-scene file renders one output per Scene class), with
@@ -55,7 +58,12 @@ async def submit_render(
                     raise RenderError(result.error or "Render failed", logs=result.logs or "")
                 time.sleep(3)
                 retry_count = 0  # reset only on a successful poll, not on every loop
-            except (http.client.RemoteDisconnected, ConnectionResetError, urllib.error.URLError) as e:
+            except (
+                http.client.RemoteDisconnected,
+                ConnectionResetError,
+                urllib.error.URLError,
+                TimeoutError,
+            ) as e:
                 retry_count += 1
                 if retry_count > max_retries:
                     raise

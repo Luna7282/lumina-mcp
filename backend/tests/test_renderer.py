@@ -89,3 +89,22 @@ class TestSubmitRender:
         assert job_id == "job-999"
         assert output_urls == ["https://x/v.mp4"]
         assert job.poll.call_count == 2
+
+    async def test_retries_on_read_timeout_then_succeeds(self, mocker):
+        job = MagicMock()
+        job.job_id = "job-111"
+        job.url = "https://x/v.mp4"
+        job.output_urls = ["https://x/v.mp4"]
+        job.poll.side_effect = [
+            TimeoutError("The read operation timed out"),
+            FakeResult(status="done"),
+        ]
+        _mock_manimstudio(mocker, job)
+        mocker.patch("lumina_app.renderer.time.sleep")  # don't actually sleep in tests
+
+        url, job_id, output_urls = await submit_render("code", "low")
+
+        assert url == "https://x/v.mp4"
+        assert job_id == "job-111"
+        assert output_urls == ["https://x/v.mp4"]
+        assert job.poll.call_count == 2
