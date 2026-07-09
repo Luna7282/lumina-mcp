@@ -67,28 +67,26 @@ def _mock_anthropic_client_with_thinking(mocker, text: str):
 
 
 class TestScenePatterns:
-    def test_overview_keywords_select_overview_pattern(self):
-        assert _get_scene_pattern("ArchitectureOverview", "shows the overall structure") == (
-            SCENE_PATTERNS["overview"]
-        )
+    def test_complete_architecture_overview_selects_multi_scene_cinematic(self):
+        assert _scene_pattern_key("CompleteArchitectureOverview", "multi") == "multi_scene_cinematic"
 
-    def test_flow_keywords_select_flow_pattern(self):
-        assert _get_scene_pattern("DataFlow", "request flow through the system") == SCENE_PATTERNS["flow"]
+    def test_folder_overview_scene_name_selects_folder_deep_dive(self):
+        assert _scene_pattern_key("BackendFolderOverview", "folder deep dive") == "folder_deep_dive"
 
-    def test_model_keywords_select_models_pattern(self):
-        assert _get_scene_pattern("UserModelHierarchy", "class inheritance") == SCENE_PATTERNS["models"]
+    def test_flow_keywords_select_data_flow_pulse(self):
+        assert _scene_pattern_key("DataFlowPipeline", "request journey") == "data_flow_pulse"
 
-    def test_component_keywords_select_components_pattern(self):
-        assert _get_scene_pattern("ServiceCommunity", "module cluster detail") == SCENE_PATTERNS["components"]
+    def test_architecture_keywords_select_3d_orbital(self):
+        assert _scene_pattern_key("Architecture3D", "galaxy orbital") == "3d_orbital"
 
-    def test_unmatched_keywords_fall_back_to_default(self):
-        assert _get_scene_pattern("SomethingElse", "no matching keywords here") == SCENE_PATTERNS["default"]
+    def test_tour_keywords_select_cinematic_zoom(self):
+        assert _get_scene_pattern("GodNodeTour", "documentary spotlight") == SCENE_PATTERNS["cinematic_zoom"]
 
-    def test_folder_overview_scene_name_selects_folder_overview_key(self):
-        assert _scene_pattern_key("BackendFolderOverview", "d") == "folder_overview"
+    def test_model_keywords_select_morphing_network(self):
+        assert _get_scene_pattern("UserModelHierarchy", "class inheritance") == SCENE_PATTERNS["morphing_network"]
 
-    def test_complete_architecture_overview_selects_multi_scene_key(self):
-        assert _scene_pattern_key("CompleteArchitectureOverview", "d") == "multi_scene"
+    def test_unmatched_keywords_fall_back_to_cinematic_zoom(self):
+        assert _get_scene_pattern("SomethingElse", "no matching keywords here") == SCENE_PATTERNS["cinematic_zoom"]
 
 
 class TestSummarizeFile:
@@ -282,8 +280,27 @@ class TestGenerateScene:
         call_kwargs = mock_client.messages.create.call_args.kwargs
         system_prompt = call_kwargs["system"]
         assert "LAYOUT RULES" in system_prompt
-        assert "Maximum 6 layers/boxes in one scene" in system_prompt
-        assert "ARROW LABEL RULES" in system_prompt
+        assert "Content area: y from -3.5 to 3.5" in system_prompt
+
+    async def test_accepts_moving_camera_scene_base(self, mocker):
+        code_text = (
+            "from manim import *\n\nclass MyScene(MovingCameraScene):\n"
+            "    def construct(self):\n        self.wait(1)\n"
+        )
+        _mock_anthropic_client(mocker, code_text)
+        plan = ScenePlan(scene_name="MyScene", title="My Scene", description="d", relevant_files=[])
+        code = await generate_scene(plan, {}, {"nodes": [], "edges": []})
+        assert "class MyScene(MovingCameraScene):" in code
+
+    async def test_accepts_three_d_scene_base(self, mocker):
+        code_text = (
+            "from manim import *\n\nclass MyScene(ThreeDScene):\n"
+            "    def construct(self):\n        self.wait(1)\n"
+        )
+        _mock_anthropic_client(mocker, code_text)
+        plan = ScenePlan(scene_name="MyScene", title="My Scene", description="d", relevant_files=[])
+        code = await generate_scene(plan, {}, {"nodes": [], "edges": []})
+        assert "class MyScene(ThreeDScene):" in code
 
     async def test_multi_scene_accepts_three_or_more_scene_classes(self, mocker):
         code_text = (
@@ -291,6 +308,24 @@ class TestGenerateScene:
             "class TitleScene(Scene):\n    def construct(self):\n        self.wait(1)\n\n"
             "class WebScene(Scene):\n    def construct(self):\n        self.wait(1)\n\n"
             "class JourneyScene(Scene):\n    def construct(self):\n        self.wait(1)\n"
+        )
+        mock_client = _mock_anthropic_client(mocker, code_text)
+        plan = ScenePlan(
+            scene_name="CompleteArchitectureOverview",
+            title="Complete Architecture Overview",
+            description="d",
+            relevant_files=[],
+        )
+        code = await generate_scene(plan, {}, {"nodes": [], "edges": []})
+        assert code == code_text.strip()
+        assert mock_client.messages.create.await_count == 1
+
+    async def test_multi_scene_accepts_mixed_cinematic_base_classes(self, mocker):
+        code_text = (
+            "from manim import *\n\n"
+            "class TitleScene(Scene):\n    def construct(self):\n        self.wait(1)\n\n"
+            "class SystemGalaxy(ThreeDScene):\n    def construct(self):\n        self.wait(1)\n\n"
+            "class RequestJourneyFlow(MovingCameraScene):\n    def construct(self):\n        self.wait(1)\n"
         )
         mock_client = _mock_anthropic_client(mocker, code_text)
         plan = ScenePlan(
