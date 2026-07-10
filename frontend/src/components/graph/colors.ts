@@ -10,12 +10,6 @@ export const NODE_COLORS: Record<GraphNode["type"], string> = {
   module: "#f1f5f9",
 };
 
-export const EDGE_COLORS: Record<GraphEdge["confidence"], string> = {
-  EXTRACTED: "#ffffff",
-  INFERRED: "#ffffff",
-  AMBIGUOUS: "#ffffff",
-};
-
 export const EDGE_OPACITY: Record<GraphEdge["confidence"], number> = {
   EXTRACTED: 0.4,
   INFERRED: 0.15,
