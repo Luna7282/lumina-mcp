@@ -82,7 +82,6 @@ export default function DependencyGraph({
 }: DependencyGraphProps) {
   const fgRef = useRef<ForceGraphMethods<GraphNode3D, GraphLink3D>>();
   const containerRef = useRef<HTMLDivElement>(null);
-  const [hoveredNode, setHoveredNode] = useState<string | null>(null);
 
   // ForceGraph3D defaults to window.innerWidth/innerHeight when no width/
   // height prop is given — it doesn't measure its containing element. Left
@@ -149,20 +148,28 @@ export default function DependencyGraph({
     [highlightedNodes, highlightMode],
   );
 
-  // Custom 3D node object — glowing sphere, optionally ringed + labeled
+  // Custom 3D node object — glowing sphere, optionally ringed + labeled.
+  //
+  // Deliberately does NOT depend on hover state. react-force-graph-3d
+  // treats a change in the `nodeThreeObject` accessor's identity as a
+  // signal to clear its whole node-object cache and rebuild every node's
+  // geometry/materials from scratch (see nodeDataMapper.clear() in
+  // three-forcegraph's digest cycle). Hovering fires far more often than
+  // clicking/searching — wiring it in here made the entire graph rebuild
+  // on every mouseover, which is what made the whole view feel laggy.
+  // Hover feedback is handled separately via the lightweight built-in
+  // `nodeLabel` tooltip instead (see the JSX below).
   const nodeThreeObject = useCallback(
     (node: N) => {
       const highlight = getNodeHighlight(node);
-      const isHovered = hoveredNode === node.id;
 
       const group = new THREE.Group();
 
-      const coreGeo = new THREE.SphereGeometry(node.isGodNode ? 4 : 2, 16, 16);
+      const coreGeo = new THREE.SphereGeometry(node.isGodNode ? 4 : 2, 10, 8);
       const baseColor = node.isGodNode ? "#ffffff" : nodeColor(node.type);
 
       const opacity = highlight === "dimmed" ? 0.08 : 1.0;
-      const emissiveIntensity =
-        highlight === "highlighted" ? 0.8 : isHovered ? 0.5 : node.isGodNode ? 0.3 : 0.1;
+      const emissiveIntensity = highlight === "highlighted" ? 0.8 : node.isGodNode ? 0.3 : 0.1;
 
       const coreMat = new THREE.MeshPhongMaterial({
         color: baseColor,
@@ -178,9 +185,9 @@ export default function DependencyGraph({
           ? COMMUNITY_COLORS[node.community % COMMUNITY_COLORS.length]
           : "#f59e0b";
 
-      // Outer glow sphere for god nodes and highlighted/hovered nodes
-      if (node.isGodNode || highlight === "highlighted" || isHovered) {
-        const glowGeo = new THREE.SphereGeometry(node.isGodNode ? 7 : 4, 16, 16);
+      // Outer glow sphere for god nodes and highlighted nodes
+      if (node.isGodNode || highlight === "highlighted") {
+        const glowGeo = new THREE.SphereGeometry(node.isGodNode ? 7 : 4, 10, 8);
         const glowMat = new THREE.MeshPhongMaterial({
           color: highlight === "highlighted" ? ringColor : node.isGodNode ? "#ffffff" : baseColor,
           emissive: highlight === "highlighted" ? ringColor : baseColor,
@@ -194,7 +201,7 @@ export default function DependencyGraph({
 
       // Pulsing ring for highlighted nodes
       if (highlight === "highlighted") {
-        const ringGeo = new THREE.RingGeometry(5, 6, 32);
+        const ringGeo = new THREE.RingGeometry(5, 6, 24);
         const ringMat = new THREE.MeshBasicMaterial({
           color: ringColor,
           transparent: true,
@@ -206,21 +213,21 @@ export default function DependencyGraph({
         group.add(ring);
       }
 
-      // Sprite text label for god nodes and hovered nodes
-      if (node.isGodNode || isHovered) {
+      // Sprite text label for god nodes (static — doesn't churn on hover)
+      if (node.isGodNode) {
         const sprite = new SpriteText(node.label);
         sprite.color = highlight === "dimmed" ? "#374151" : "#ffffff";
-        sprite.textHeight = node.isGodNode ? 3 : 2.5;
+        sprite.textHeight = 3;
         sprite.backgroundColor = "rgba(0,0,0,0.6)";
         sprite.padding = 1;
         sprite.borderRadius = 2;
-        sprite.position.y = node.isGodNode ? 7 : 5;
+        sprite.position.y = 7;
         group.add(sprite);
       }
 
       return group;
     },
-    [getNodeHighlight, hoveredNode, highlightMode],
+    [getNodeHighlight, highlightMode],
   );
 
   const getLinkColor = useCallback(
@@ -295,11 +302,16 @@ export default function DependencyGraph({
         backgroundColor="#000000"
         nodeThreeObject={nodeThreeObject}
         nodeThreeObjectExtend={false}
-        nodeLabel={() => ""}
+        nodeLabel={(node) => node.label}
         linkColor={getLinkColor}
         linkWidth={(link) => LINK_WIDTH[link.confidence]}
         linkOpacity={0.6}
-        linkCurvature={0.1}
+        // Straight lines use a cheap ~6-segment cylinder per edge. Any
+        // nonzero curvature switches every link to a TubeGeometry sampled
+        // at 30 path segments — ~30x the geometry for a purely cosmetic
+        // curve, and it scales with edge count. Not worth it past a
+        // handful of edges.
+        linkCurvature={0}
         linkDirectionalParticles={(link) =>
           link.relation === "calls" ? 3 : link.relation === "handles" ? 2 : link.relation === "imports" ? 1 : 0
         }
@@ -312,7 +324,6 @@ export default function DependencyGraph({
         d3VelocityDecay={0.3}
         onNodeClick={(node) => onNodeClick(node.id)}
         onNodeHover={(node) => {
-          setHoveredNode(node?.id ?? null);
           onNodeHover(node?.id ?? null);
           document.body.style.cursor = node ? "pointer" : "default";
         }}
