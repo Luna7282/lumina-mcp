@@ -81,7 +81,27 @@ export default function DependencyGraph({
   focusNodeId,
 }: DependencyGraphProps) {
   const fgRef = useRef<ForceGraphMethods<GraphNode3D, GraphLink3D>>();
+  const containerRef = useRef<HTMLDivElement>(null);
   const [hoveredNode, setHoveredNode] = useState<string | null>(null);
+
+  // ForceGraph3D defaults to window.innerWidth/innerHeight when no width/
+  // height prop is given — it doesn't measure its containing element. Left
+  // unset, the canvas renders far wider than this 55%-width column and its
+  // (mostly transparent) overflow sits in front of the right-hand panel for
+  // pointer-event purposes, silently swallowing clicks there even though
+  // the panel visually paints on top. Track the actual container size and
+  // pass it through explicitly.
+  const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(([entry]) => {
+      if (!entry) return;
+      setDimensions({ width: entry.contentRect.width, height: entry.contentRect.height });
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   // Convert Lumina graph schema to react-force-graph format. Node objects
   // are memoized on `graph` alone (not activeRelations) since 3d-force-graph
@@ -235,6 +255,17 @@ export default function DependencyGraph({
 
   // Custom d3 force: pull nodes toward a per-community position on a ring,
   // so Leiden clusters read as visually distinct clumps in 3D space.
+  //
+  // Registering the force only touches the persistent d3ForceLayout object,
+  // which is safe at any time — but do NOT also call d3ReheatSimulation()
+  // here. That forces engineRunning=true immediately, and if this effect
+  // fires before react-force-graph-3d's own internal digest cycle has run
+  // at least once (it initializes `state.layout` from the graphData prop
+  // asynchronously, not synchronously with React's render), the next
+  // animation frame calls state.layout.tick() while state.layout is still
+  // undefined — throwing, killing the WebGL context, and leaving a black
+  // canvas. The initial graphData load already reheats the simulation on
+  // its own, so no manual reheat is needed here.
   useEffect(() => {
     const fg = fgRef.current;
     if (!fg) return;
@@ -252,13 +283,14 @@ export default function DependencyGraph({
         node.vz = (node.vz ?? 0) + (0 - (node.z ?? 0)) * strength * 0.5;
       }
     });
-    fg.d3ReheatSimulation();
   }, [graphData.nodes, graph.community_summary]);
 
   return (
-    <div className="relative h-full w-full bg-black">
+    <div ref={containerRef} className="relative h-full w-full bg-black">
       <ForceGraph3D<GraphNode3D, GraphLink3D>
         ref={fgRef}
+        width={dimensions.width || undefined}
+        height={dimensions.height || undefined}
         graphData={graphData}
         backgroundColor="#000000"
         nodeThreeObject={nodeThreeObject}
